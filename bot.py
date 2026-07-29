@@ -13,7 +13,7 @@ from datetime import datetime
 from flask import Flask
 
 # ==========================================
-# 1. НАСТРОЙКИ (БЕЗ ХАРДКОДА)
+# 1. НАСТРОЙКИ
 # ==========================================
 def get_env_var(name, required=True):
     """Безопасное получение переменных окружения"""
@@ -22,17 +22,21 @@ def get_env_var(name, required=True):
         raise ValueError(f"❌ Переменная окружения {name} не установлена!")
     return value
 
-CONFIG = {
-    # --- FunPay (ТОЛЬКО из переменных окружения) ---
-    "FUNPAY_LOGIN": get_env_var("FUNPAY_LOGIN"),
-    "FUNPAY_PASSWORD": get_env_var("FUNPAY_PASSWORD"),
-    
-    # --- Telegram ---
-    "TELEGRAM_TOKEN": get_env_var("TELEGRAM_TOKEN"),
-    "TELEGRAM_CHAT_IDS": get_env_var("TELEGRAM_CHAT_IDS", required=False).split(",") if get_env_var("TELEGRAM_CHAT_IDS", required=False) else [],
-    
-    # --- Сообщения ---
-    "FIRST_MESSAGE": """Здравствуйте, {buyer_name}!
+try:
+    CONFIG = {
+        # --- FunPay (только из переменных окружения) ---
+        "FUNPAY_LOGIN": get_env_var("FUNPAY_LOGIN"),
+        "FUNPAY_PASSWORD": get_env_var("FUNPAY_PASSWORD"),
+        
+        # --- Telegram ---
+        "TELEGRAM_TOKEN": get_env_var("TELEGRAM_TOKEN"),
+        "TELEGRAM_CHAT_IDS": [
+            "8138491685",  # ← ТВОЙ CHAT ID
+            "1973759066",
+        ],
+        
+        # --- Сообщения ---
+        "FIRST_MESSAGE": """Здравствуйте, {buyer_name}!
 
 ⏰ Время работы продавца с 5:00 до 22:00 по МСК.
 📌 Обычно я отвечаю быстро, но бывает что время ответа может быть больше. Приношу извинения!
@@ -44,8 +48,8 @@ CONFIG = {
 • Если нужен КОД с почты - напишите: !код
 
 После команды я уведомлю продавца!""",
-    
-    "PAYMENT_CONFIRMED_MESSAGE": """✅ Спасибо за покупку!
+        
+        "PAYMENT_CONFIRMED_MESSAGE": """✅ Спасибо за покупку!
 
 Благодарим за доверие! 🙏
 
@@ -53,37 +57,45 @@ CONFIG = {
 Это поможет нам стать лучше!
 
 Хорошего дня! 😊""",
-    
-    "PAYMENT_PATTERNS": [
-        r"подтвердил успешное выполнение заказа",
-        r"подтвердил.*выполнение заказа",
-        r"отправил деньги продавцу",
-        r"заказ #[A-Z0-9]+",
-        r"Покупатель.*подтвердил"
-    ],
-    
-    "ORDER_WORDS": ["здравствуйте", "привет", "хочу купить", "заказ", "куплю", "есть", "продаете", "добрый день", "здрасьте"],
-    
-    "FRUIT_COMMAND": "!фрукт",
-    "CODE_COMMAND": "!код",
-    
-    "CHECK_INTERVAL": 15,
-    "DEBUG": False
-}
+        
+        "PAYMENT_PATTERNS": [
+            r"подтвердил успешное выполнение заказа",
+            r"подтвердил.*выполнение заказа",
+            r"отправил деньги продавцу",
+            r"заказ #[A-Z0-9]+",
+            r"Покупатель.*подтвердил"
+        ],
+        
+        "ORDER_WORDS": ["здравствуйте", "привет", "хочу купить", "заказ", "куплю", "есть", "продаете", "добрый день", "здрасьте"],
+        
+        "FRUIT_COMMAND": "!фрукт",
+        "CODE_COMMAND": "!код",
+        
+        "CHECK_INTERVAL": 15,
+        "DEBUG": False
+    }
+except ValueError as e:
+    print(f"❌ Ошибка конфигурации: {e}")
+    print("📌 Убедитесь, что все переменные окружения установлены!")
+    sys.exit(1)
 
 # ==========================================
-# 2. TELEGRAM (АСИНХРОННАЯ ВЕРСИЯ)
+# 2. TELEGRAM
 # ==========================================
 async def send_telegram_async(message):
     """Асинхронная отправка в Telegram"""
-    if not CONFIG["TELEGRAM_TOKEN"] or not CONFIG["TELEGRAM_CHAT_IDS"]:
-        print("⚠️ Telegram не настроен")
+    if not CONFIG["TELEGRAM_TOKEN"]:
+        print("⚠️ TELEGRAM_TOKEN не настроен!")
+        return False
+    
+    if not CONFIG["TELEGRAM_CHAT_IDS"]:
+        print("⚠️ TELEGRAM_CHAT_IDS не настроены!")
         return False
     
     sent_count = 0
     async with aiohttp.ClientSession() as session:
         for chat_id in CONFIG["TELEGRAM_CHAT_IDS"]:
-            chat_id = chat_id.strip()
+            chat_id = str(chat_id).strip()
             if not chat_id:
                 continue
                 
@@ -108,23 +120,20 @@ async def send_telegram_async(message):
     
     return sent_count > 0
 
-# Синхронная обертка для совместимости
 def send_telegram(message):
-    """Синхронная обертка (вызывается из синхронного кода)"""
+    """Синхронная обертка для совместимости"""
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # Если цикл уже запущен, создаем задачу
             asyncio.create_task(send_telegram_async(message))
             return True
         else:
             return loop.run_until_complete(send_telegram_async(message))
     except RuntimeError:
-        # Если нет цикла, создаем новый
         return asyncio.run(send_telegram_async(message))
 
 # ==========================================
-# 3. БАЗА ДАННЫХ (SQLite вместо JSON)
+# 3. БАЗА ДАННЫХ (SQLite)
 # ==========================================
 import sqlite3
 from contextlib import contextmanager
@@ -221,6 +230,7 @@ class FunPayBot:
         self.page = None
         self.db = ClientDatabase()
         self.running = True
+        self.playwright = None  # ← Сохраняем экземпляр Playwright
     
     async def start(self):
         """Запуск браузера и вход на FunPay"""
@@ -231,19 +241,19 @@ class FunPayBot:
         await send_telegram_async("✅ <b>Бот запущен!</b>\n🕐 " + datetime.now().strftime("%H:%M:%S"))
         
         print("🔄 Шаг 3: Запуск Playwright...")
-        p = await async_playwright().start()
+        self.playwright = await async_playwright().start()  # ← Сохраняем
         print("✅ Playwright запущен")
         
         print("🔄 Шаг 4: Запуск браузера...")
         try:
-            self.browser = await p.firefox.launch(
+            self.browser = await self.playwright.firefox.launch(
                 headless=not self.config["DEBUG"],
                 args=['--no-sandbox', '--disable-setuid-sandbox']
             )
             print("✅ Firefox запущен")
         except Exception as e:
             print(f"❌ Firefox не удался: {e}")
-            self.browser = await p.chromium.launch(
+            self.browser = await self.playwright.chromium.launch(
                 headless=not self.config["DEBUG"],
                 args=['--no-sandbox', '--disable-setuid-sandbox']
             )
@@ -268,7 +278,7 @@ class FunPayBot:
         await self.main_loop()
     
     async def _install_browser(self):
-        """Установка браузера (выполняется 1 раз при сборке)"""
+        """Установка браузера (выполняется 1 раз при первом запуске)"""
         try:
             # Проверяем, установлен ли браузер
             result = await asyncio.create_subprocess_exec(
@@ -290,6 +300,12 @@ class FunPayBot:
         try:
             print("🔑 Ищу кнопку входа...")
             
+            # Проверяем, залогинены ли уже
+            profile = self.page.locator('[class*="profile"]:not([class*="login"])')
+            if await profile.count() > 0:
+                print("✅ Уже авторизован")
+                return
+            
             login_selectors = [
                 'text="Вход"',
                 'text="Войти"',
@@ -297,8 +313,7 @@ class FunPayBot:
                 'button:has-text("Войти")',
                 'a:has-text("Вход")',
                 '.login-btn',
-                '[class*="login"]',
-                '[class*="auth"]'
+                '[class*="login"]'
             ]
             
             login_found = False
@@ -314,13 +329,7 @@ class FunPayBot:
                     continue
             
             if not login_found:
-                # Проверяем, возможно уже залогинены
-                profile = self.page.locator('[class*="profile"], [class*="user"]')
-                if await profile.count() > 0:
-                    print("✅ Уже авторизован")
-                    return
-                else:
-                    raise RuntimeError("❌ Не удалось найти кнопку входа")
+                raise RuntimeError("❌ Не удалось найти кнопку входа")
             
             await asyncio.sleep(2)
             
@@ -359,7 +368,7 @@ class FunPayBot:
             await self.page.wait_for_load_state("networkidle", timeout=30000)
             
             # Проверяем успешность входа
-            profile = self.page.locator('[class*="profile"], [class*="user"]')
+            profile = self.page.locator('[class*="profile"]:not([class*="login"])')
             if await profile.count() > 0:
                 print("✅ Успешный вход!")
                 await send_telegram_async("✅ <b>Успешный вход в FunPay!</b>")
@@ -369,7 +378,7 @@ class FunPayBot:
         except Exception as e:
             print(f"❌ Ошибка входа: {e}")
             await send_telegram_async(f"⚠️ <b>Ошибка входа в FunPay!</b>\n{str(e)}")
-            raise  # Прерываем выполнение, если вход не удался
+            raise
     
     async def _get_element_text(self, locator):
         """Безопасное получение текста элемента"""
@@ -384,7 +393,7 @@ class FunPayBot:
         """Проверка новых сообщений"""
         try:
             # Идем в чаты без полной перезагрузки
-            if self.page.url != "https://funpay.com/chat/":
+            if "/chat" not in self.page.url:
                 await self.page.goto("https://funpay.com/chat/")
                 await self.page.wait_for_load_state("networkidle")
                 await asyncio.sleep(2)
@@ -427,7 +436,6 @@ class FunPayBot:
                             msg_text = await msg_element.text_content() or ""
                             
                             is_from_client = await self._is_message_from_client(msg_element)
-                            is_system = await self._is_system_message(msg_element)
                             is_payment = await self._is_payment_confirmation(msg_text)
                             
                             # Добавляем клиента в базу
@@ -476,8 +484,8 @@ class FunPayBot:
                                         print(f"📨 Первое сообщение для {client_name}")
                                         await asyncio.sleep(1)
                             
-                            # Подтверждение оплаты
-                            if is_system and is_payment:
+                            # Подтверждение оплаты (теперь проверяем только is_payment)
+                            if is_payment:
                                 if not self.db.is_thank_you_sent(client_name):
                                     order_match = re.search(r'#[A-Z0-9]+', msg_text)
                                     order_number = order_match.group(0) if order_match else ""
@@ -513,16 +521,6 @@ class FunPayBot:
                     
         except Exception as e:
             print(f"⚠️ Ошибка проверки: {e}")
-    
-    async def _is_system_message(self, message_element):
-        """Проверка системного сообщения"""
-        try:
-            classes = await message_element.get_attribute('class')
-            if classes and ('system' in classes or 'notification' in classes):
-                return True
-            return False
-        except:
-            return False
     
     async def _is_payment_confirmation(self, text):
         """Проверка подтверждения оплаты"""
@@ -640,8 +638,7 @@ class FunPayBot:
                     await self.page.close()
                     await self.browser.close()
                     
-                    p = await async_playwright().start()
-                    self.browser = await p.firefox.launch(
+                    self.browser = await self.playwright.firefox.launch(
                         headless=not self.config["DEBUG"],
                         args=['--no-sandbox', '--disable-setuid-sandbox']
                     )
@@ -656,6 +653,8 @@ class FunPayBot:
         self.running = False
         if self.browser:
             await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
         await send_telegram_async("🛑 <b>Бот остановлен</b>")
 
 # ==========================================
@@ -704,7 +703,7 @@ def main():
     web_thread.start()
     print(f"✅ Health check: порт {os.environ.get('PORT', 10000)}")
     
-    # Бот в основном потоке
+    # Бот
     run_bot()
 
 if __name__ == "__main__":
