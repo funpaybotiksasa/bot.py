@@ -7,8 +7,10 @@ import os
 import requests
 import subprocess
 import sys
+import threading
 from playwright.async_api import async_playwright
 from datetime import datetime
+from flask import Flask
 
 # ==========================================
 # 1. НАСТРОЙКИ (ИЗМЕНИ ПОД СЕБЯ)
@@ -18,9 +20,12 @@ CONFIG = {
     "FUNPAY_LOGIN": os.getenv("FUNPAY_LOGIN", "leopardplay135"),
     "FUNPAY_PASSWORD": os.getenv("FUNPAY_PASSWORD", "Rodionrodion@10"),
     
-    # --- Telegram (из переменных окружения) ---
-    "TELEGRAM_TOKEN": os.getenv("TELEGRAM_TOKEN", ""),
-    "TELEGRAM_CHAT_IDS": os.getenv("TELEGRAM_CHAT_IDS", "").split(","),
+    # --- Telegram (ВШИТЫЕ CHAT ID) ---
+    "TELEGRAM_TOKEN": os.getenv("TELEGRAM_TOKEN", "ТВОЙ_ТОКЕН_ОТ_BOTFATHER"),
+    "TELEGRAM_CHAT_IDS": [
+        "8138491685",  # ← ВСТАВЬ СВОЙ CHAT ID (только цифры!)
+        "1973759066",  # ← Второй Chat ID (если нужен)
+    ],
     
     # --- Сообщения бота ---
     "FIRST_MESSAGE": """Здравствуйте, {buyer_name}!
@@ -97,7 +102,7 @@ def send_telegram(message):
     sent_count = 0
     
     for chat_id in CONFIG["TELEGRAM_CHAT_IDS"]:
-        chat_id = chat_id.strip()
+        chat_id = str(chat_id).strip()
         if not chat_id:
             continue
             
@@ -621,9 +626,33 @@ class FunPayBot:
         send_telegram("🛑 <b>Бот остановлен</b>")
 
 # ==========================================
-# 6. ЗАПУСК
+# 6. HEALTH CHECKS (Flask сервер)
+# ==========================================
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "Bot is running!", 200
+
+@app.route('/health')
+def health():
+    return {"status": "ok", "time": datetime.now().isoformat()}, 200
+
+def run_web():
+    """Запускает веб-сервер для health checks"""
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
+
+# ==========================================
+# 7. ЗАПУСК
 # ==========================================
 async def main():
+    # Запускаем веб-сервер в отдельном потоке
+    web_thread = threading.Thread(target=run_web, daemon=True)
+    web_thread.start()
+    print(f"✅ Health check сервер запущен на порту {os.environ.get('PORT', 10000)}")
+    
+    # Запускаем бота
     bot = FunPayBot(CONFIG)
     try:
         await bot.start()
