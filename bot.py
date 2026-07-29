@@ -5,21 +5,22 @@ import random
 import json
 import os
 import requests
+import subprocess
+import sys
 from playwright.async_api import async_playwright
 from datetime import datetime
 
 # ==========================================
-# 1. НАСТРОЙКИ (БЕРЕМ ИЗ ПЕРЕМЕННЫХ RAILWAY)
+# 1. НАСТРОЙКИ (ИЗМЕНИ ПОД СЕБЯ)
 # ==========================================
 CONFIG = {
-    # --- FunPay (из переменных Railway) ---
+    # --- FunPay (из переменных окружения) ---
     "FUNPAY_LOGIN": os.getenv("FUNPAY_LOGIN", "leopardplay135"),
     "FUNPAY_PASSWORD": os.getenv("FUNPAY_PASSWORD", "Rodionrodion@10"),
     
-    # --- Telegram (из переменных Railway) ---
+    # --- Telegram (из переменных окружения) ---
     "TELEGRAM_TOKEN": os.getenv("TELEGRAM_TOKEN", ""),
-    # Можно использовать одну переменную для нескольких ID через запятую
-    "TELEGRAM_CHAT_IDS": os.getenv("TELEGRAM_CHAT_IDS", "123456789").split(","),
+    "TELEGRAM_CHAT_IDS": os.getenv("TELEGRAM_CHAT_IDS", "").split(","),
     
     # --- Сообщения бота ---
     "FIRST_MESSAGE": """Здравствуйте, {buyer_name}!
@@ -58,11 +59,34 @@ CONFIG = {
     "CODE_COMMAND": "!код",
     
     "CHECK_INTERVAL": 15,
-    "DEBUG": False
+    "DEBUG": False  # На сервере всегда False
 }
 
 # ==========================================
-# 2. ОТПРАВКА УВЕДОМЛЕНИЙ В TELEGRAM
+# 2. УСТАНОВКА БРАУЗЕРА
+# ==========================================
+def install_browser():
+    """Устанавливает браузер для Playwright если его нет"""
+    try:
+        print("🔄 Проверка браузера...")
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "firefox"],
+            capture_output=True,
+            text=True,
+            timeout=180
+        )
+        if result.returncode == 0:
+            print("✅ Браузер установлен")
+            return True
+        else:
+            print(f"❌ Ошибка установки: {result.stderr}")
+            return False
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+        return False
+
+# ==========================================
+# 3. ОТПРАВКА УВЕДОМЛЕНИЙ В TELEGRAM
 # ==========================================
 def send_telegram(message):
     """Отправляет сообщение ВСЕМ пользователям из списка TELEGRAM_CHAT_IDS"""
@@ -73,7 +97,7 @@ def send_telegram(message):
     sent_count = 0
     
     for chat_id in CONFIG["TELEGRAM_CHAT_IDS"]:
-        chat_id = chat_id.strip()  # Убираем пробелы
+        chat_id = chat_id.strip()
         if not chat_id:
             continue
             
@@ -101,7 +125,7 @@ def send_telegram(message):
     return False
 
 # ==========================================
-# 3. БАЗА ДАННЫХ
+# 4. БАЗА ДАННЫХ
 # ==========================================
 class ClientDatabase:
     def __init__(self):
@@ -193,7 +217,7 @@ class ClientDatabase:
         return False
 
 # ==========================================
-# 4. ОСНОВНОЙ БОТ
+# 5. ОСНОВНОЙ БОТ
 # ==========================================
 class FunPayBot:
     def __init__(self, config):
@@ -204,11 +228,16 @@ class FunPayBot:
     
     async def start(self):
         """Запуск браузера и вход на FunPay"""
+        
+        # Устанавливаем браузер если его нет
+        install_browser()
+        
+        # Отправляем уведомление о запуске
         send_telegram("✅ <b>Бот запущен!</b>\n🕐 " + datetime.now().strftime("%H:%M:%S"))
         
         p = await async_playwright().start()
         
-        # Используем Firefox (легче устанавливается на Railway)
+        # Используем Firefox
         self.browser = await p.firefox.launch(
             headless=not self.config["DEBUG"],
             args=['--no-sandbox', '--disable-setuid-sandbox']
@@ -592,7 +621,7 @@ class FunPayBot:
         send_telegram("🛑 <b>Бот остановлен</b>")
 
 # ==========================================
-# 5. ЗАПУСК
+# 6. ЗАПУСК
 # ==========================================
 async def main():
     bot = FunPayBot(CONFIG)
