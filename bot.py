@@ -659,7 +659,7 @@ def run_web():
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # ==========================================
-# 7. ЗАПУСК
+# 7. ЗАПУСК (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 # ==========================================
 async def main():
     print("🔄 Запускаю бота...")
@@ -670,9 +670,10 @@ async def main():
     print(f"✅ Health check сервер запущен на порту {os.environ.get('PORT', 10000)}")
     
     # Даем время Flask запуститься
-    await asyncio.sleep(2)
+    await asyncio.sleep(3)
     
-    # Запускаем бота в основном потоке
+    # ✅ ПРИНУДИТЕЛЬНО ЗАПУСКАЕМ БОТА В ОСНОВНОМ ПОТОКЕ
+    print("🔄 Теперь запускаю основного бота...")
     bot = FunPayBot(CONFIG)
     try:
         await bot.start()
