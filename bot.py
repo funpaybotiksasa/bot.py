@@ -245,11 +245,20 @@ class FunPayBot:
         print("✅ Playwright запущен")
         
         print("🔄 Шаг 4: Запуск браузера Firefox...")
-        self.browser = await p.firefox.launch(
-            headless=not self.config["DEBUG"],
-            args=['--no-sandbox', '--disable-setuid-sandbox']
-        )
-        print("✅ Браузер запущен")
+        try:
+            self.browser = await p.firefox.launch(
+                headless=not self.config["DEBUG"],
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            print("✅ Браузер Firefox запущен")
+        except Exception as e:
+            print(f"❌ Ошибка запуска Firefox: {e}")
+            print("🔄 Пробую Chromium...")
+            self.browser = await p.chromium.launch(
+                headless=not self.config["DEBUG"],
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            print("✅ Chromium запущен")
         
         self.page = await self.browser.new_page()
         
@@ -653,17 +662,17 @@ def run_web():
 # 7. ЗАПУСК
 # ==========================================
 async def main():
-    # Запускаем веб-сервер в отдельном потоке
+    print("🔄 Запускаю бота...")
+    
+    # Запускаем Flask в отдельном потоке (фоновый режим)
     web_thread = threading.Thread(target=run_web, daemon=True)
     web_thread.start()
     print(f"✅ Health check сервер запущен на порту {os.environ.get('PORT', 10000)}")
     
     # Даем время Flask запуститься
-    await asyncio.sleep(1)
+    await asyncio.sleep(2)
     
-    print("🔄 Запускаю бота...")
-    
-    # Запускаем бота
+    # Запускаем бота в основном потоке
     bot = FunPayBot(CONFIG)
     try:
         await bot.start()
