@@ -234,19 +234,22 @@ class FunPayBot:
     async def start(self):
         """Запуск браузера и вход на FunPay"""
         
-        # Устанавливаем браузер если его нет
+        print("🔄 Шаг 1: Установка браузера...")
         install_browser()
         
-        # Отправляем уведомление о запуске
+        print("🔄 Шаг 2: Отправка уведомления в Telegram...")
         send_telegram("✅ <b>Бот запущен!</b>\n🕐 " + datetime.now().strftime("%H:%M:%S"))
         
+        print("🔄 Шаг 3: Запуск Playwright...")
         p = await async_playwright().start()
+        print("✅ Playwright запущен")
         
-        # Используем Firefox
+        print("🔄 Шаг 4: Запуск браузера Firefox...")
         self.browser = await p.firefox.launch(
             headless=not self.config["DEBUG"],
             args=['--no-sandbox', '--disable-setuid-sandbox']
         )
+        print("✅ Браузер запущен")
         
         self.page = await self.browser.new_page()
         
@@ -256,13 +259,16 @@ class FunPayBot:
             });
         """)
         
-        print("🔄 Открываю FunPay...")
+        print("🔄 Шаг 5: Открываю FunPay...")
         await self.page.goto("https://funpay.com/", timeout=60000)
         
         await self.page.wait_for_load_state("networkidle")
         await asyncio.sleep(3)
         
+        print("🔄 Шаг 6: Вход в FunPay...")
         await self.login()
+        
+        print("🔄 Шаг 7: Запуск главного цикла...")
         await self.main_loop()
     
     async def login(self):
@@ -641,7 +647,7 @@ def health():
 def run_web():
     """Запускает веб-сервер для health checks"""
     port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # ==========================================
 # 7. ЗАПУСК
@@ -651,6 +657,11 @@ async def main():
     web_thread = threading.Thread(target=run_web, daemon=True)
     web_thread.start()
     print(f"✅ Health check сервер запущен на порту {os.environ.get('PORT', 10000)}")
+    
+    # Даем время Flask запуститься
+    await asyncio.sleep(1)
+    
+    print("🔄 Запускаю бота...")
     
     # Запускаем бота
     bot = FunPayBot(CONFIG)
