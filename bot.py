@@ -900,34 +900,28 @@ def debug_structure():
     
     async def _get_structure():
         try:
-            # Переходим в чаты
             await BOT_INSTANCE.page.goto("https://funpay.com/chat/")
             await BOT_INSTANCE.page.wait_for_load_state("networkidle")
             await asyncio.sleep(2)
             
-            # Проверяем, есть ли диалоги
             dialogs = BOT_INSTANCE.page.locator('.contact-item')
             dialog_count = await dialogs.count()
             
             if dialog_count == 0:
                 return {"error": "Нет диалогов"}
             
-            # Открываем первый диалог
             first_dialog = dialogs.first
             await first_dialog.click()
             await asyncio.sleep(2)
             
-            # Проверяем, есть ли сообщения
             messages = BOT_INSTANCE.page.locator('.chat-msg-item')
             msg_count = await messages.count()
             
             if msg_count == 0:
                 return {"error": "Нет сообщений в диалоге"}
             
-            # Берем первое сообщение
             first_msg = messages.first
             
-            # Получаем все атрибуты
             attrs = await first_msg.evaluate("""
                 element => {
                     if (!element) return null;
@@ -947,22 +941,16 @@ def debug_structure():
             if not attrs:
                 return {"error": "Не удалось получить атрибуты"}
             
-            # Проверяем наличие ID
-            has_data_id = 'data-id' in attrs
-            has_id = 'id' in attrs
-            
-            result = {
+            return {
                 "attributes": attrs,
-                "has_data_id": has_data_id,
-                "has_id": has_id,
+                "has_data_id": 'data-id' in attrs,
+                "has_id": 'id' in attrs,
                 "message_count": msg_count,
                 "dialog_count": dialog_count
             }
             
-            return result
-            
         except Exception as e:
-            return {"error": str(e), "trace": str(e.__traceback__)}
+            return {"error": str(e)}
     
     try:
         future = asyncio.run_coroutine_threadsafe(_get_structure(), MAIN_EVENT_LOOP)
@@ -971,22 +959,46 @@ def debug_structure():
     except Exception as e:
         return f"Ошибка: {e}", 500
 
+@app.route('/debug-now')
+def debug_now():
+    if SCREENSHOT_TOKEN:
+        token = request.args.get("token", "")
+        if token != SCREENSHOT_TOKEN:
+            return "Forbidden", 403
+
+    if BOT_INSTANCE is None:
+        return "Бот ещё не запущен", 503
+
+    BOT_INSTANCE.debug_requested = True
+    return "Запрошено. Скриншот и HTML придут в Telegram в течение 15-20 секунд.", 200
+
+def run_web():
+    """Запуск Flask для health checks"""
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
 # ==========================================
 # 6. ЗАПУСК
 # ==========================================
 def run_bot():
     print("🔵 run_bot()")
+    sys.stdout.flush()
     try:
-        asyncio.run(main_bot())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(main_bot())
     except Exception as e:
         print(f"❌ RUN_BOT_ERROR: {repr(e)}")
         import traceback
         traceback.print_exc()
         raise
+    finally:
+        loop.close()
 
 async def main_bot():
     global MAIN_EVENT_LOOP, BOT_INSTANCE
     print("🔵 main_bot()")
+    sys.stdout.flush()
     MAIN_EVENT_LOOP = asyncio.get_running_loop()
     bot = FunPayBot(CONFIG)
     BOT_INSTANCE = bot
@@ -994,12 +1006,16 @@ async def main_bot():
 
 def main():
     print("🔵 main()")
+    sys.stdout.flush()
     print("🔄 Запуск...")
+    sys.stdout.flush()
     web_thread = threading.Thread(target=run_web, daemon=True)
     web_thread.start()
     print(f"✅ Health check: порт {os.environ.get('PORT', 10000)}")
+    sys.stdout.flush()
     run_bot()
 
 if __name__ == "__main__":
     print("🔵 __main__")
+    sys.stdout.flush()
     main()
