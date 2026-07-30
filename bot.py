@@ -900,59 +900,76 @@ def debug_structure():
     
     async def _get_structure():
         try:
+            # Переходим в чаты
             await BOT_INSTANCE.page.goto("https://funpay.com/chat/")
             await BOT_INSTANCE.page.wait_for_load_state("networkidle")
-            
-            dialog = BOT_INSTANCE.page.locator('.contact-item').first
-            if await dialog.count() == 0:
-                return "Нет диалогов"
-            
-            await dialog.click()
             await asyncio.sleep(2)
             
-            msg = BOT_INSTANCE.page.locator('.chat-msg-item').first
-            if await msg.count() == 0:
-                return "Нет сообщений"
+            # Проверяем, есть ли диалоги
+            dialogs = BOT_INSTANCE.page.locator('.contact-item')
+            dialog_count = await dialogs.count()
             
-            attrs = await BOT_INSTANCE.page.evaluate("""
+            if dialog_count == 0:
+                return {"error": "Нет диалогов"}
+            
+            # Открываем первый диалог
+            first_dialog = dialogs.first
+            await first_dialog.click()
+            await asyncio.sleep(2)
+            
+            # Проверяем, есть ли сообщения
+            messages = BOT_INSTANCE.page.locator('.chat-msg-item')
+            msg_count = await messages.count()
+            
+            if msg_count == 0:
+                return {"error": "Нет сообщений в диалоге"}
+            
+            # Берем первое сообщение
+            first_msg = messages.first
+            
+            # Получаем все атрибуты
+            attrs = await first_msg.evaluate("""
                 element => {
+                    if (!element) return null;
                     const result = {};
-                    for (const attr of element.attributes) {
-                        result[attr.name] = attr.value;
+                    if (element.attributes) {
+                        for (const attr of element.attributes) {
+                            result[attr.name] = attr.value;
+                        }
                     }
-                    result.outerHTML = element.outerHTML;
-                    result.className = element.className;
+                    result.outerHTML = element.outerHTML || '';
+                    result.className = element.className || '';
+                    result.tagName = element.tagName || '';
                     return result;
                 }
-            """, msg)
+            """)
             
-            return attrs
+            if not attrs:
+                return {"error": "Не удалось получить атрибуты"}
+            
+            # Проверяем наличие ID
+            has_data_id = 'data-id' in attrs
+            has_id = 'id' in attrs
+            
+            result = {
+                "attributes": attrs,
+                "has_data_id": has_data_id,
+                "has_id": has_id,
+                "message_count": msg_count,
+                "dialog_count": dialog_count
+            }
+            
+            return result
+            
         except Exception as e:
-            return f"Ошибка: {e}"
+            return {"error": str(e), "trace": str(e.__traceback__)}
     
     try:
         future = asyncio.run_coroutine_threadsafe(_get_structure(), MAIN_EVENT_LOOP)
-        result = future.result(timeout=15)
+        result = future.result(timeout=20)
         return json.dumps(result, indent=2, ensure_ascii=False)
     except Exception as e:
         return f"Ошибка: {e}", 500
-
-@app.route('/debug-now')
-def debug_now():
-    if SCREENSHOT_TOKEN:
-        token = request.args.get("token", "")
-        if token != SCREENSHOT_TOKEN:
-            return "Forbidden", 403
-
-    if BOT_INSTANCE is None:
-        return "Бот ещё не запущен", 503
-
-    BOT_INSTANCE.debug_requested = True
-    return "Запрошено. Скриншот и HTML придут в Telegram в течение 15-20 секунд.", 200
-
-def run_web():
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # ==========================================
 # 6. ЗАПУСК
