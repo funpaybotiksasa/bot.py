@@ -328,8 +328,7 @@ class FunPayBot:
             # Ждём, пока реально появится форма входа (модалка), а не просто спим по таймеру
             try:
                 await self.page.wait_for_selector(
-                    'input[name="login"], input[name="user[login]"], '
-                    'input[type="email"], input[type="text"]:visible',
+                    'input[placeholder="Имя или почта"], input[name="login"], input[name="user[login]"]',
                     timeout=10000
                 )
             except Exception:
@@ -338,25 +337,43 @@ class FunPayBot:
             await asyncio.sleep(1)
             
             print("🔑 Логин...")
+            # ВАЖНО: не используем общий input[type="text"] — на странице есть строка поиска игр
+            # с таким же типом, и она стоит в DOM раньше формы входа, из-за чего логин
+            # раньше улетал именно туда, а не в поле авторизации.
             login_input = self.page.locator(
-                'input[name="login"], input[name="user[login]"], '
-                'input[type="email"], input[type="text"]'
+                'input[placeholder="Имя или почта"], input[name="login"], input[name="user[login]"]'
             ).first
             if await login_input.count() == 0:
                 await self._save_debug("no_login_field")
                 raise RuntimeError("❌ Поле логина не найдено")
+            await login_input.click()
             await login_input.fill(self.config["FUNPAY_LOGIN"])
             await asyncio.sleep(1)
             
             print("🔑 Пароль...")
             pass_input = self.page.locator(
-                'input[name="password"], input[name="user[password]"], input[type="password"]'
+                'input[placeholder="Пароль"], input[name="password"], input[name="user[password]"], input[type="password"]'
             ).first
             if await pass_input.count() == 0:
                 await self._save_debug("no_password_field")
                 raise RuntimeError("❌ Поле пароля не найдено")
+            await pass_input.click()
             await pass_input.fill(self.config["FUNPAY_PASSWORD"])
             await asyncio.sleep(1)
+            
+            # Проверяем наличие Cloudflare Turnstile — если есть, автоматический вход, скорее всего,
+            # не пройдёт: такие капчи специально мешают headless-браузерам их проходить.
+            try:
+                turnstile = self.page.locator('iframe[src*="challenges.cloudflare.com"], [class*="cf-turnstile"]')
+                if await turnstile.count() > 0:
+                    print("⚠️ Обнаружена Cloudflare Turnstile капча")
+                    await self._save_debug("turnstile_detected")
+                    await send_telegram_async(
+                        "⚠️ <b>На странице входа обнаружена Cloudflare-капча.</b>\n"
+                        "Автоматический вход может не пройти без ручного решения капчи."
+                    )
+            except Exception:
+                pass
             
             print("🔑 Войти...")
             submit_selectors = [
