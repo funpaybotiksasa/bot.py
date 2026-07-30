@@ -1,0 +1,15 @@
+FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Браузеры уже есть в базовом образе, но на всякий случай убедимся, что нужная версия установлена
+RUN playwright install chromium
+
+COPY . .
+
+EXPOSE 8080
+
+CMD ["python3", "bot.py"]
