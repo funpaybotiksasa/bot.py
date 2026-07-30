@@ -388,8 +388,9 @@ class FunPayBot:
             print(f"⚠️ Не удалось закрыть cookie-баннер: {e}")
     
     async def _get_message_id(self, message_element, debug=False):
+        """Получает ТОЛЬКО стабильный ID (data-id, id, или хеш из текста)"""
         try:
-            # 1. data-id
+            # 1. data-id (САМЫЙ НАДЕЖНЫЙ)
             msg_id = await message_element.get_attribute('data-id')
             if msg_id:
                 if debug:
@@ -411,39 +412,10 @@ class FunPayBot:
                     print(f"✅ Найден msg-* в классах: {match.group(1)}")
                 return f"class_{match.group(1)}"
             
-            # 4. Хеш только из текста сообщения
+            # 4. Если нет ID - возвращаем None (не создаем хеш!)
             if debug:
-                print("⚠️ ID не найден, создаю хеш из текста сообщения...")
-            
-            # Определяем автора
-            author = "client"
-            if "out" in classes:
-                author = "me"
-            
-            # Берем ТОЛЬКО текст сообщения
-            body = message_element.locator(".chat-msg-text, .msg-text, [class*='msg-text']").first
-            text = ""
-            if await body.count() > 0:
-                text = await body.text_content() or ""
-            else:
-                text = await message_element.text_content() or ""
-            
-            # Очищаем текст от лишних пробелов
-            text = re.sub(r'\s+', ' ', text).strip()
-            
-            # Добавляем позицию в DOM для стабильности
-            index = await message_element.evaluate("""
-                el => Array.from(el.parentNode.children).indexOf(el)
-            """)
-            
-            # Создаём хеш
-            content = f"{author}|{text}|{index}"
-            hash_id = hashlib.md5(content.encode('utf-8')).hexdigest()[:16]
-            
-            if debug:
-                print(f"🔑 Создан хеш ID: {hash_id} (текст: {text[:30]}...)")
-            
-            return f"hash_{hash_id}"
+                print("⚠️ ID не найден (возвращаю None)")
+            return None
             
         except Exception as e:
             print(f"⚠️ Ошибка получения ID: {e}")
@@ -691,7 +663,18 @@ class FunPayBot:
                     last_saved_id = self.db.get_last_message_id(client_name)
                     
                     if last_saved_id is None:
-                        print(f"⚠️ {client_name}: нет сохраненного ID, пропускаю")
+                        print(f"⚠️ {client_name}: нет сохраненного ID, инициализирую...")
+                        # При первом запуске просто запоминаем последнее сообщение
+                        await dialog.click()
+                        await asyncio.sleep(1)
+                        messages = self.page.locator('.chat-msg-item')
+                        msg_count = await messages.count()
+                        if msg_count > 0:
+                            last_msg = messages.nth(msg_count - 1)
+                            msg_id = await self._get_message_id(last_msg)
+                            if msg_id:
+                                self.db.set_last_message_id(client_name, msg_id)
+                                print(f"💾 Установлен last_message_id для {client_name}: {msg_id}")
                         await self.page.goto("https://funpay.com/chat/")
                         await asyncio.sleep(1)
                         continue
@@ -711,38 +694,43 @@ class FunPayBot:
                     if i == 0 and msg_count > 0:
                         await self._debug_message_structure(messages.nth(0))
                     
-                    # Находим новые сообщения (исправленная логика)
+                    # Находим новые сообщения (идем с конца)
                     new_messages = []
-                    collect = False
+                    found_last = False
                     
-                    # Проходим по сообщениям в порядке от старых к новым
-                    for j in range(msg_count):
+                    # Проходим с конца, чтобы найти последнее сохраненное сообщение
+                    for j in range(msg_count - 1, -1, -1):
                         msg_element = messages.nth(j)
                         msg_id = await self._get_message_id(msg_element)
                         
-                        # Если еще не начали собирать, ищем last_saved_id
-                        if not collect:
+                        if not found_last:
                             if msg_id and msg_id == last_saved_id:
-                                collect = True
+                                found_last = True
                                 print(f"  ✅ Найден последний обработанный ID: {msg_id}")
                             continue
                         
-                        # После нахождения last_saved_id - собираем все следующие сообщения
+                        # После нахождения last_saved_id - собираем все сообщения выше
                         if msg_id:
                             new_messages.append((msg_element, msg_id))
                             print(f"  ➕ Новое сообщение: {msg_id}")
                         else:
                             print(f"  ⚠️ Сообщение без ID, пропускаю")
                     
-                    # Если last_saved_id не найден - НЕ обновляем базу!
-                    if not collect and msg_count > 0:
-                        print(f"⚠️ Последний ID не найден у {client_name}, НЕ обновляю базу (только лог)")
-                        # Отправляем предупреждение в Telegram
-                        await send_telegram_async(f"⚠️ <b>Рассинхрон ID у {client_name}</b>\nСохраненный ID не найден. Новые сообщения не обрабатываются.")
-                        # НЕ обновляем базу - просто выходим
+                    # Если last_saved_id не найден - обновляем базу на последнее сообщение
+                    if not found_last and msg_count > 0:
+                        print(f"⚠️ Последний ID не найден у {client_name}, обновляю на последнее сообщение")
+                        last_msg = messages.nth(msg_count - 1)
+                        last_id = await self._get_message_id(last_msg)
+                        if last_id:
+                            self.db.set_last_message_id(client_name, last_id)
+                            print(f"💾 Обновлен last_message_id для {client_name}: {last_id}")
+                            await send_telegram_async(f"🔄 <b>Синхронизация ID для {client_name}</b>\nОбновлен на последнее сообщение: {last_id}")
                         await self.page.goto("https://funpay.com/chat/")
                         await asyncio.sleep(1)
                         continue
+                    
+                    # Разворачиваем new_messages в правильном порядке (от старых к новым)
+                    new_messages.reverse()
                     
                     if new_messages:
                         print(f"📨 Новых сообщений для {client_name}: {len(new_messages)}")
@@ -855,174 +843,4 @@ class FunPayBot:
             await self.browser.close()
         if self.playwright:
             await self.playwright.stop()
-        await send_telegram_async("🛑 <b>Бот остановлен</b>")
-
-# ==========================================
-# 5. HEALTH CHECKS + SCREENSHOT + DEBUG
-# ==========================================
-app = Flask(__name__)
-
-MAIN_EVENT_LOOP = None
-BOT_INSTANCE = None
-SCREENSHOT_TOKEN = os.environ.get("SCREENSHOT_TOKEN", "")
-
-@app.route('/')
-def health_check():
-    return "Bot is running!", 200
-
-@app.route('/health')
-def health():
-    return {"status": "ok", "time": datetime.now().isoformat()}, 200
-
-@app.route('/screenshot')
-def screenshot():
-    if SCREENSHOT_TOKEN:
-        token = request.args.get("token", "")
-        if token != SCREENSHOT_TOKEN:
-            return "Forbidden", 403
-
-    if BOT_INSTANCE is None or BOT_INSTANCE.page is None or MAIN_EVENT_LOOP is None:
-        return "Бот ещё не запущен", 503
-
-    async def _take_screenshot():
-        return await BOT_INSTANCE.page.screenshot(full_page=True)
-
-    try:
-        future = asyncio.run_coroutine_threadsafe(_take_screenshot(), MAIN_EVENT_LOOP)
-        image_bytes = future.result(timeout=15)
-        return Response(image_bytes, mimetype="image/png")
-    except Exception as e:
-        return f"Ошибка получения скриншота: {e}", 500
-
-@app.route('/debug-structure')
-def debug_structure():
-    if SCREENSHOT_TOKEN:
-        token = request.args.get("token", "")
-        if token != SCREENSHOT_TOKEN:
-            return "Forbidden", 403
-
-    if BOT_INSTANCE is None or BOT_INSTANCE.page is None:
-        return "Бот не запущен", 503
-
-    async def _get_structure():
-        result = {}
-        try:
-            await BOT_INSTANCE.page.goto("https://funpay.com/chat/", wait_until="domcontentloaded")
-            await BOT_INSTANCE.page.wait_for_load_state("networkidle")
-            await asyncio.sleep(2)
-
-            dialogs = BOT_INSTANCE.page.locator('.contact-item')
-            dialog_count = await dialogs.count()
-            result["dialog_count"] = dialog_count
-
-            if dialog_count == 0:
-                result["error"] = "Нет диалогов"
-                return result
-
-            await dialogs.first.click()
-            await BOT_INSTANCE.page.wait_for_load_state("networkidle")
-            await asyncio.sleep(2)
-
-            messages = BOT_INSTANCE.page.locator('.chat-msg-item')
-            msg_count = await messages.count()
-            result["msg_count"] = msg_count
-
-            if msg_count == 0:
-                result["error"] = "Нет сообщений"
-                return result
-
-            first_msg = messages.first
-            attrs = await first_msg.evaluate("""
-                element => {
-                    if (!element) return null;
-                    const result = {};
-                    for (const attr of element.attributes) {
-                        result[attr.name] = attr.value;
-                    }
-                    result.outerHTML = element.outerHTML || '';
-                    result.className = element.className || '';
-                    result.tagName = element.tagName || '';
-                    return result;
-                }
-            """)
-
-            result["attributes"] = attrs
-            result["has_data_id"] = 'data-id' in (attrs or {})
-            result["has_id"] = 'id' in (attrs or {})
-            result["success"] = True
-
-            return result
-
-        except Exception as e:
-            result["error"] = str(e)
-            result["error_type"] = type(e).__name__
-            import traceback
-            result["traceback"] = traceback.format_exc()
-            return result
-
-    try:
-        future = asyncio.run_coroutine_threadsafe(_get_structure(), MAIN_EVENT_LOOP)
-        result = future.result(timeout=30)
-        return json.dumps(result, indent=2, ensure_ascii=False)
-    except Exception as e:
-        return f"Ошибка: {e}", 500
-
-@app.route('/debug-now')
-def debug_now():
-    if SCREENSHOT_TOKEN:
-        token = request.args.get("token", "")
-        if token != SCREENSHOT_TOKEN:
-            return "Forbidden", 403
-
-    if BOT_INSTANCE is None:
-        return "Бот ещё не запущен", 503
-
-    BOT_INSTANCE.debug_requested = True
-    return "Запрошено. Скриншот и HTML придут в Telegram в течение 15-20 секунд.", 200
-
-def run_web():
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
-# ==========================================
-# 6. ЗАПУСК
-# ==========================================
-def run_bot():
-    print("🔵 run_bot()")
-    sys.stdout.flush()
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(main_bot())
-    except Exception as e:
-        print(f"❌ RUN_BOT_ERROR: {repr(e)}")
-        import traceback
-        traceback.print_exc()
-        raise
-    finally:
-        loop.close()
-
-async def main_bot():
-    global MAIN_EVENT_LOOP, BOT_INSTANCE
-    print("🔵 main_bot()")
-    sys.stdout.flush()
-    MAIN_EVENT_LOOP = asyncio.get_running_loop()
-    bot = FunPayBot(CONFIG)
-    BOT_INSTANCE = bot
-    await bot.start()
-
-def main():
-    print("🔵 main()")
-    sys.stdout.flush()
-    print("🔄 Запуск...")
-    sys.stdout.flush()
-    web_thread = threading.Thread(target=run_web, daemon=True)
-    web_thread.start()
-    print(f"✅ Health check: порт {os.environ.get('PORT', 10000)}")
-    sys.stdout.flush()
-    run_bot()
-
-if __name__ == "__main__":
-    print("🔵 __main__")
-    sys.stdout.flush()
-    main()
+        await send_telegram_async("🛑 <b>Бот
