@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["python311", "python311Packages.pip", "python311Packages.playwright"]
+nixPkgs = ["python311", "python311Packages.pip"]
 
 [phases.install]
 cmds = [
@@ -8,4 +8,4 @@ cmds = [
 ]
 
 [phases.start]
-cmds = ["python bot.py"]
+cmds = ["python3.11 bot.py"]
