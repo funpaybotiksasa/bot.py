@@ -303,6 +303,8 @@ class FunPayBot:
         await self.page.wait_for_load_state("networkidle")
         print(f"📍 URL: {self.page.url}")
         
+        await self._accept_cookies()
+        
         print("🔄 Проверка входа по сессии...")
         await self.login()
         
@@ -311,6 +313,18 @@ class FunPayBot:
         
         print("🔄 Запуск главного цикла...")
         await self.main_loop()
+    
+    async def _accept_cookies(self):
+        """Закрывает баннер согласия на cookies (cc-accept-all) — без этого
+        баннер может перекрывать поле ввода и мешать кликам/отправке сообщений."""
+        try:
+            accept_btn = self.page.locator('.cc-accept-all').first
+            if await accept_btn.count() > 0 and await accept_btn.is_visible():
+                await accept_btn.click(timeout=5000)
+                print("✅ Cookie-баннер закрыт")
+                await asyncio.sleep(0.5)
+        except Exception as e:
+            print(f"⚠️ Не удалось закрыть cookie-баннер: {e}")
     
     async def _save_debug(self, tag):
         """Сохраняет скриншот и HTML, и отправляет скриншот в Telegram (полезно, когда нет доступа к ФС сервера)."""
@@ -346,14 +360,14 @@ class FunPayBot:
         через cookie golden_key, полученный из ручного входа в обычном браузере.
         """
         try:
-            # Ищем признаки авторизованного состояния: ссылку на профиль/баланс в шапке,
-            # либо прямое совпадение URL с /users/ (у FunPay профиль обычно вида /users/12345/)
-            account_locator = self.page.locator('a[href*="/users/"], .user-link, .header-user')
-            is_logged_in = await account_locator.count() > 0 or "/users/" in self.page.url
+            # Точный признак авторизации — блок с именем текущего пользователя в шапке сайта
+            account_locator = self.page.locator('.user-link-name').first
+            is_logged_in = await account_locator.count() > 0
 
             if is_logged_in:
-                print("✅ Сессия активна — вход выполнен через cookie")
-                await send_telegram_async("✅ <b>Вход в FunPay выполнен (по сохранённой сессии)</b>")
+                self.own_username = (await account_locator.text_content() or "").strip()
+                print(f"✅ Сессия активна — вход выполнен через cookie (аккаунт: {self.own_username})")
+                await send_telegram_async(f"✅ <b>Вход в FunPay выполнен</b> (аккаунт: {self.own_username})")
                 return
 
             # Если сессии нет — форма логина всё равно потребует капчу, поэтому
@@ -384,6 +398,7 @@ class FunPayBot:
                 await self.page.goto("https://funpay.com/chat/")
                 await self.page.wait_for_load_state("networkidle")
                 await asyncio.sleep(2)
+                await self._accept_cookies()
             
             # Ручная диагностика: если через /debug-now попросили дамп — сохраняем
             # HTML+скриншот страницы чатов "как есть". Если есть непрочитанный диалог —
@@ -423,7 +438,7 @@ class FunPayBot:
                         self.page.locator('.chat-header .media-user-name')
                     ) or "покупатель"
                     
-                    messages = self.page.locator('.message-text')
+                    messages = self.page.locator('.chat-msg-item')
                     msg_count = await messages.count()
                     if msg_count == 0:
                         continue
@@ -532,6 +547,7 @@ class FunPayBot:
     
     async def send_message(self, text):
         try:
+            await self._accept_cookies()
             textarea = self.page.locator('textarea[name="content"]')
             if await textarea.count() == 0:
                 print("⚠️ Поле ввода не найдено")
