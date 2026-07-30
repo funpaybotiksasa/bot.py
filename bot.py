@@ -25,7 +25,7 @@ try:
         "FUNPAY_LOGIN": get_env_var("FUNPAY_LOGIN"),
         "FUNPAY_PASSWORD": get_env_var("FUNPAY_PASSWORD"),
         "TELEGRAM_TOKEN": get_env_var("TELEGRAM_TOKEN"),
-        "TELEGRAM_CHAT_IDS": ["8138491685"],["1973759066"]   # ← ТВОЙ CHAT ID
+        "TELEGRAM_CHAT_IDS": ["8138491685", "1973759066"],   # ← ТВОЙ CHAT ID
         "FIRST_MESSAGE": """Здравствуйте, {buyer_name}!
 
 ⏰ Время работы продавца с 5:00 до 22:00 по МСК.
