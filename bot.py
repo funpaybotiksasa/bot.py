@@ -9,7 +9,7 @@ import sys
 import threading
 from playwright.async_api import async_playwright
 from datetime import datetime
-from flask import Flask
+from flask import Flask, request
 
 # ==========================================
 # 1. НАСТРОЙКИ
@@ -98,6 +98,37 @@ def send_telegram(message):
             return loop.run_until_complete(send_telegram_async(message))
     except RuntimeError:
         return asyncio.run(send_telegram_async(message))
+
+async def send_telegram_document_async(file_path, caption=""):
+    """Отправляет файл (например, HTML страницы) в Telegram как документ — для диагностики селекторов."""
+    if not CONFIG["TELEGRAM_TOKEN"] or not CONFIG["TELEGRAM_CHAT_IDS"]:
+        return False
+    if not os.path.exists(file_path):
+        print(f"⚠️ Файл для отправки не найден: {file_path}")
+        return False
+    sent_count = 0
+    async with aiohttp.ClientSession() as session:
+        for chat_id in CONFIG["TELEGRAM_CHAT_IDS"]:
+            chat_id = str(chat_id).strip()
+            if not chat_id:
+                continue
+            try:
+                url = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_TOKEN']}/sendDocument"
+                with open(file_path, "rb") as doc_file:
+                    form = aiohttp.FormData()
+                    form.add_field("chat_id", chat_id)
+                    form.add_field("caption", caption[:1024])
+                    form.add_field("document", doc_file, filename=os.path.basename(file_path))
+                    async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                        if response.status == 200:
+                            sent_count += 1
+                            print(f"✅ Документ отправлен: {chat_id}")
+                        else:
+                            text = await response.text()
+                            print(f"❌ Ошибка отправки документа {chat_id}: {text}")
+            except Exception as e:
+                print(f"❌ Ошибка отправки документа {chat_id}: {e}")
+    return sent_count > 0
 
 async def send_telegram_photo_async(photo_path, caption=""):
     """Отправляет скриншот в Telegram — удобно для диагностики на серверах без доступа к ФС."""
@@ -220,6 +251,7 @@ class FunPayBot:
         self.db = ClientDatabase()
         self.running = True
         self.playwright = None
+        self.debug_requested = False
     
     async def start(self):
         print("🔵 START()")
@@ -294,6 +326,7 @@ class FunPayBot:
             title = await self.page.title()
             caption = f"🔍 Debug: {tag}\n📍 URL: {self.page.url}\n📄 Title: {title}"
             await send_telegram_photo_async(screenshot_path, caption)
+            await send_telegram_document_async(html_path, f"HTML: {tag}")
 
             # Ищем явные признаки капчи/блокировки на странице
             page_text = (await self.page.content()).lower()
@@ -352,8 +385,15 @@ class FunPayBot:
                 await self.page.wait_for_load_state("networkidle")
                 await asyncio.sleep(2)
             
+            # Ручная диагностика: если через /debug-now попросили дамп — сохраняем
+            # HTML+скриншот страницы чатов "как есть", чтобы подобрать точные селекторы.
+            if self.debug_requested:
+                await self._save_debug("chat_page_manual")
+                self.debug_requested = False
+            
             dialogs = self.page.locator('.chat-item:has(.badge), .chat-item.unread')
             dialog_count = await dialogs.count()
+            print(f"🔍 Диалогов с непрочитанным (по текущим селекторам): {dialog_count}")
             if dialog_count == 0:
                 return
             
@@ -545,9 +585,20 @@ class FunPayBot:
         await send_telegram_async("🛑 <b>Бот остановлен</b>")
 
 # ==========================================
-# 5. HEALTH CHECKS (Flask)
+# 5. HEALTH CHECKS + LIVE SCREENSHOT (Flask)
 # ==========================================
+from flask import Response
+import concurrent.futures
+
 app = Flask(__name__)
+
+# Ссылки на работающий цикл событий и экземпляр бота — нужны, чтобы Flask
+# (который крутится в отдельном потоке) мог попросить Playwright сделать
+# скриншот текущей страницы прямо из основного asyncio-цикла бота.
+MAIN_EVENT_LOOP = None
+BOT_INSTANCE = None
+
+SCREENSHOT_TOKEN = os.environ.get("SCREENSHOT_TOKEN", "")
 
 @app.route('/')
 def health_check():
@@ -556,6 +607,44 @@ def health_check():
 @app.route('/health')
 def health():
     return {"status": "ok", "time": datetime.now().isoformat()}, 200
+
+@app.route('/screenshot')
+def screenshot():
+    # Простая защита токеном, чтобы скриншот не мог открыть кто угодно по адресу сервиса.
+    # Задайте переменную окружения SCREENSHOT_TOKEN и открывайте /screenshot?token=ваш_токен
+    if SCREENSHOT_TOKEN:
+        token = request.args.get("token", "")
+        if token != SCREENSHOT_TOKEN:
+            return "Forbidden", 403
+
+    if BOT_INSTANCE is None or BOT_INSTANCE.page is None or MAIN_EVENT_LOOP is None:
+        return "Бот ещё не запущен", 503
+
+    async def _take_screenshot():
+        return await BOT_INSTANCE.page.screenshot(full_page=True)
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(_take_screenshot(), MAIN_EVENT_LOOP)
+        image_bytes = future.result(timeout=15)
+        return Response(image_bytes, mimetype="image/png")
+    except Exception as e:
+        return f"Ошибка получения скриншота: {e}", 500
+
+@app.route('/debug-now')
+def debug_now():
+    # Ставит боту флаг: при следующей проверке диалогов (в течение CHECK_INTERVAL секунд)
+    # он пришлёт в Telegram скриншот и HTML-файл текущей страницы чатов "как есть" —
+    # это нужно, чтобы подобрать точные CSS-селекторы под реальную вёрстку FunPay.
+    if SCREENSHOT_TOKEN:
+        token = request.args.get("token", "")
+        if token != SCREENSHOT_TOKEN:
+            return "Forbidden", 403
+
+    if BOT_INSTANCE is None:
+        return "Бот ещё не запущен", 503
+
+    BOT_INSTANCE.debug_requested = True
+    return "Запрошено. Скриншот и HTML придут в Telegram в течение 15-20 секунд.", 200
 
 def run_web():
     port = int(os.environ.get('PORT', 10000))
@@ -575,8 +664,11 @@ def run_bot():
         raise
 
 async def main_bot():
+    global MAIN_EVENT_LOOP, BOT_INSTANCE
     print("🔵 main_bot()")
+    MAIN_EVENT_LOOP = asyncio.get_running_loop()
     bot = FunPayBot(CONFIG)
+    BOT_INSTANCE = bot
     await bot.start()
 
 def main():
