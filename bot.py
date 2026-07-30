@@ -100,6 +100,37 @@ def send_telegram(message):
     except RuntimeError:
         return asyncio.run(send_telegram_async(message))
 
+async def send_telegram_photo_async(photo_path, caption=""):
+    """Отправляет скриншот в Telegram — удобно для диагностики на серверах без доступа к ФС."""
+    if not CONFIG["TELEGRAM_TOKEN"] or not CONFIG["TELEGRAM_CHAT_IDS"]:
+        return False
+    if not os.path.exists(photo_path):
+        print(f"⚠️ Файл для отправки не найден: {photo_path}")
+        return False
+    sent_count = 0
+    async with aiohttp.ClientSession() as session:
+        for chat_id in CONFIG["TELEGRAM_CHAT_IDS"]:
+            chat_id = str(chat_id).strip()
+            if not chat_id:
+                continue
+            try:
+                url = f"https://api.telegram.org/bot{CONFIG['TELEGRAM_TOKEN']}/sendPhoto"
+                with open(photo_path, "rb") as photo_file:
+                    form = aiohttp.FormData()
+                    form.add_field("chat_id", chat_id)
+                    form.add_field("caption", caption[:1024])
+                    form.add_field("photo", photo_file, filename="debug.png", content_type="image/png")
+                    async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=20)) as response:
+                        if response.status == 200:
+                            sent_count += 1
+                            print(f"✅ Скриншот отправлен: {chat_id}")
+                        else:
+                            text = await response.text()
+                            print(f"❌ Ошибка отправки фото {chat_id}: {text}")
+            except Exception as e:
+                print(f"❌ Ошибка отправки фото {chat_id}: {e}")
+    return sent_count > 0
+
 # ==========================================
 # 3. БАЗА ДАННЫХ (SQLite)
 # ==========================================
@@ -241,15 +272,28 @@ class FunPayBot:
         await self.main_loop()
     
     async def _save_debug(self, tag):
-        """Сохраняет скриншот и HTML страницы для диагностики проблем с селекторами."""
+        """Сохраняет скриншот и HTML, и отправляет скриншот в Telegram (полезно, когда нет доступа к ФС сервера)."""
         try:
-            await self.page.screenshot(path=f"/app/debug_{tag}.png", full_page=True)
+            screenshot_path = f"/tmp/debug_{tag}.png"
+            html_path = f"/tmp/debug_{tag}.html"
+            await self.page.screenshot(path=screenshot_path, full_page=True)
             html = await self.page.content()
-            with open(f"/app/debug_{tag}.html", "w", encoding="utf-8") as f:
+            with open(html_path, "w", encoding="utf-8") as f:
                 f.write(html)
-            print(f"🔍 Debug сохранён: debug_{tag}.png / debug_{tag}.html")
+            print(f"🔍 Debug сохранён: {screenshot_path}")
+
+            title = await self.page.title()
+            caption = f"🔍 Debug: {tag}\n📍 URL: {self.page.url}\n📄 Title: {title}"
+            await send_telegram_photo_async(screenshot_path, caption)
+
+            # Ищем явные признаки капчи/блокировки на странице
+            page_text = (await self.page.content()).lower()
+            suspicious_markers = ["captcha", "капча", "подтвердите, что вы не робот", "cloudflare", "доступ ограничен", "заблокирован"]
+            found_markers = [m for m in suspicious_markers if m in page_text]
+            if found_markers:
+                await send_telegram_async(f"⚠️ Возможна блокировка/капча. Найдены маркеры: {', '.join(found_markers)}")
         except Exception as e:
-            print(f"⚠️ Не удалось сохранить debug: {e}")
+            print(f"⚠️ Не удалось сохранить/отправить debug: {e}")
     
     async def login(self):
         try:
@@ -344,7 +388,19 @@ class FunPayBot:
                 print("✅ Успешный вход!")
                 await send_telegram_async("✅ <b>Успешный вход в FunPay!</b>")
             else:
+                # Пробуем найти явный текст ошибки на странице (неверный логин/пароль и т.п.)
+                error_text = None
+                try:
+                    error_locator = self.page.locator(
+                        '.alert-danger, .form-error, .error-message, [class*="error"]'
+                    ).first
+                    if await error_locator.count() > 0:
+                        error_text = await error_locator.text_content()
+                except Exception:
+                    pass
                 await self._save_debug("login_not_confirmed")
+                if error_text:
+                    raise RuntimeError(f"❌ Не удалось подтвердить вход. Сообщение на странице: {error_text.strip()}")
                 raise RuntimeError("❌ Не удалось подтвердить вход")
                 
         except Exception as e:
