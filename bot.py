@@ -863,4 +863,126 @@ SCREENSHOT_TOKEN = os.environ.get("SCREENSHOT_TOKEN", "")
 def health_check():
     return "Bot is running!", 200
 
-@app.route('/health
+@app.route('/health')
+def health():
+    return {"status": "ok", "time": datetime.now().isoformat()}, 200
+
+@app.route('/screenshot')
+def screenshot():
+    if SCREENSHOT_TOKEN:
+        token = request.args.get("token", "")
+        if token != SCREENSHOT_TOKEN:
+            return "Forbidden", 403
+
+    if BOT_INSTANCE is None or BOT_INSTANCE.page is None or MAIN_EVENT_LOOP is None:
+        return "Бот ещё не запущен", 503
+
+    async def _take_screenshot():
+        return await BOT_INSTANCE.page.screenshot(full_page=True)
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(_take_screenshot(), MAIN_EVENT_LOOP)
+        image_bytes = future.result(timeout=15)
+        return Response(image_bytes, mimetype="image/png")
+    except Exception as e:
+        return f"Ошибка получения скриншота: {e}", 500
+
+@app.route('/debug-structure')
+def debug_structure():
+    """Диагностика: возвращает структуру первого сообщения в чате"""
+    if SCREENSHOT_TOKEN:
+        token = request.args.get("token", "")
+        if token != SCREENSHOT_TOKEN:
+            return "Forbidden", 403
+    
+    if BOT_INSTANCE is None or BOT_INSTANCE.page is None:
+        return "Бот не запущен", 503
+    
+    async def _get_structure():
+        try:
+            await BOT_INSTANCE.page.goto("https://funpay.com/chat/")
+            await BOT_INSTANCE.page.wait_for_load_state("networkidle")
+            
+            dialog = BOT_INSTANCE.page.locator('.contact-item').first
+            if await dialog.count() == 0:
+                return "Нет диалогов"
+            
+            await dialog.click()
+            await asyncio.sleep(2)
+            
+            msg = BOT_INSTANCE.page.locator('.chat-msg-item').first
+            if await msg.count() == 0:
+                return "Нет сообщений"
+            
+            attrs = await BOT_INSTANCE.page.evaluate("""
+                element => {
+                    const result = {};
+                    for (const attr of element.attributes) {
+                        result[attr.name] = attr.value;
+                    }
+                    result.outerHTML = element.outerHTML;
+                    result.className = element.className;
+                    return result;
+                }
+            """, msg)
+            
+            return attrs
+        except Exception as e:
+            return f"Ошибка: {e}"
+    
+    try:
+        future = asyncio.run_coroutine_threadsafe(_get_structure(), MAIN_EVENT_LOOP)
+        result = future.result(timeout=15)
+        return json.dumps(result, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return f"Ошибка: {e}", 500
+
+@app.route('/debug-now')
+def debug_now():
+    if SCREENSHOT_TOKEN:
+        token = request.args.get("token", "")
+        if token != SCREENSHOT_TOKEN:
+            return "Forbidden", 403
+
+    if BOT_INSTANCE is None:
+        return "Бот ещё не запущен", 503
+
+    BOT_INSTANCE.debug_requested = True
+    return "Запрошено. Скриншот и HTML придут в Telegram в течение 15-20 секунд.", 200
+
+def run_web():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+# ==========================================
+# 6. ЗАПУСК
+# ==========================================
+def run_bot():
+    print("🔵 run_bot()")
+    try:
+        asyncio.run(main_bot())
+    except Exception as e:
+        print(f"❌ RUN_BOT_ERROR: {repr(e)}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+async def main_bot():
+    global MAIN_EVENT_LOOP, BOT_INSTANCE
+    print("🔵 main_bot()")
+    MAIN_EVENT_LOOP = asyncio.get_running_loop()
+    bot = FunPayBot(CONFIG)
+    BOT_INSTANCE = bot
+    await bot.start()
+
+def main():
+    print("🔵 main()")
+    print("🔄 Запуск...")
+    web_thread = threading.Thread(target=run_web, daemon=True)
+    web_thread.start()
+    print(f"✅ Health check: порт {os.environ.get('PORT', 10000)}")
+    run_bot()
+
+if __name__ == "__main__":
+    print("🔵 __main__")
+    main()
