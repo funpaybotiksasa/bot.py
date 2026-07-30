@@ -837,7 +837,7 @@ class FunPayBot:
                 except Exception as restart_error:
                     print(f"❌ Ошибка восстановления: {restart_error}")
     
-      async def close(self):
+    async def close(self):
         self.running = False
         if self.browser:
             await self.browser.close()
