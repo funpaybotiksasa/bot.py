@@ -389,18 +389,21 @@ class FunPayBot:
     
     async def _get_message_id(self, message_element, debug=False):
         try:
+            # 1. data-id
             msg_id = await message_element.get_attribute('data-id')
             if msg_id:
                 if debug:
                     print(f"✅ Найден data-id: {msg_id}")
                 return f"dataid_{msg_id}"
             
+            # 2. id
             msg_id = await message_element.get_attribute('id')
             if msg_id:
                 if debug:
                     print(f"✅ Найден id: {msg_id}")
                 return f"id_{msg_id}"
             
+            # 3. msg-* в классах
             classes = await message_element.get_attribute('class') or ""
             match = re.search(r'msg-(\d+)', classes)
             if match:
@@ -408,27 +411,37 @@ class FunPayBot:
                     print(f"✅ Найден msg-* в классах: {match.group(1)}")
                 return f"class_{match.group(1)}"
             
+            # 4. Хеш только из текста сообщения
             if debug:
-                print("⚠️ ID не найден, создаю хеш...")
+                print("⚠️ ID не найден, создаю хеш из текста сообщения...")
             
+            # Определяем автора
             author = "client"
             if "out" in classes:
                 author = "me"
-            elif "in" in classes:
-                author = "client"
             
-            html = await message_element.evaluate("el => el.outerHTML")
+            # Берем ТОЛЬКО текст сообщения
+            body = message_element.locator(".chat-msg-text, .msg-text, [class*='msg-text']").first
+            text = ""
+            if await body.count() > 0:
+                text = await body.text_content() or ""
+            else:
+                text = await message_element.text_content() or ""
             
-            time_elem = await message_element.locator('.time, .message-time, [class*="time"]').first
-            time_text = ""
-            if await time_elem.count() > 0:
-                time_text = await time_elem.text_content() or ""
+            # Очищаем текст от лишних пробелов
+            text = re.sub(r'\s+', ' ', text).strip()
             
-            content = f"{author}|{html}|{time_text}"
+            # Добавляем позицию в DOM для стабильности
+            index = await message_element.evaluate("""
+                el => Array.from(el.parentNode.children).indexOf(el)
+            """)
+            
+            # Создаём хеш
+            content = f"{author}|{text}|{index}"
             hash_id = hashlib.md5(content.encode('utf-8')).hexdigest()[:16]
             
             if debug:
-                print(f"🔑 Создан хеш ID: {hash_id} (автор: {author})")
+                print(f"🔑 Создан хеш ID: {hash_id} (текст: {text[:30]}...)")
             
             return f"hash_{hash_id}"
             
@@ -531,7 +544,7 @@ class FunPayBot:
                             print(f"📌 {client_name}: последний ID = {msg_id}")
                             initialized += 1
                         else:
-                            print(f"⚠️ {client_name}: ID не найден, пропускаю")
+                            print(f"⚠️ {client_name}: не удалось получить ID, пропускаю")
                             failed += 1
                     
                     await self.page.goto("https://funpay.com/chat/")
@@ -679,6 +692,8 @@ class FunPayBot:
                     
                     if last_saved_id is None:
                         print(f"⚠️ {client_name}: нет сохраненного ID, пропускаю")
+                        await self.page.goto("https://funpay.com/chat/")
+                        await asyncio.sleep(1)
                         continue
                     
                     print(f"🔍 {client_name}: last_saved_id = {last_saved_id}")
@@ -696,29 +711,43 @@ class FunPayBot:
                     if i == 0 and msg_count > 0:
                         await self._debug_message_structure(messages.nth(0))
                     
-                    # Находим новые сообщения
+                    # Находим новые сообщения (исправленная логика)
                     new_messages = []
-                    found_last = False
+                    collect = False
                     
+                    # Проходим по сообщениям в порядке от старых к новым
                     for j in range(msg_count):
                         msg_element = messages.nth(j)
                         msg_id = await self._get_message_id(msg_element)
                         
-                        if not found_last:
+                        # Если еще не начали собирать, ищем last_saved_id
+                        if not collect:
                             if msg_id and msg_id == last_saved_id:
-                                found_last = True
+                                collect = True
                                 print(f"  ✅ Найден последний обработанный ID: {msg_id}")
                             continue
                         
+                        # После нахождения last_saved_id - собираем все следующие сообщения
                         if msg_id:
                             new_messages.append((msg_element, msg_id))
                             print(f"  ➕ Новое сообщение: {msg_id}")
                         else:
                             print(f"  ⚠️ Сообщение без ID, пропускаю")
                     
+                    # Если last_saved_id не найден - НЕ обновляем базу!
+                    if not collect and msg_count > 0:
+                        print(f"⚠️ Последний ID не найден у {client_name}, НЕ обновляю базу (только лог)")
+                        # Отправляем предупреждение в Telegram
+                        await send_telegram_async(f"⚠️ <b>Рассинхрон ID у {client_name}</b>\nСохраненный ID не найден. Новые сообщения не обрабатываются.")
+                        # НЕ обновляем базу - просто выходим
+                        await self.page.goto("https://funpay.com/chat/")
+                        await asyncio.sleep(1)
+                        continue
+                    
                     if new_messages:
                         print(f"📨 Новых сообщений для {client_name}: {len(new_messages)}")
                         
+                        # Обновляем last_message_id на последнее новое
                         last_new_id = new_messages[-1][1]
                         if last_new_id:
                             self.db.set_last_message_id(client_name, last_new_id)
