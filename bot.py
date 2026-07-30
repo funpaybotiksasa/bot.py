@@ -837,10 +837,180 @@ class FunPayBot:
                 except Exception as restart_error:
                     print(f"❌ Ошибка восстановления: {restart_error}")
     
-    async def close(self):
+      async def close(self):
         self.running = False
         if self.browser:
             await self.browser.close()
         if self.playwright:
             await self.playwright.stop()
-        await send_telegram_async("🛑 <b>Бот
+        await send_telegram_async("🛑 <b>Бот остановлен</b>")
+
+# ==========================================
+# 5. HEALTH CHECKS + SCREENSHOT + DEBUG
+# ==========================================
+app = Flask(__name__)
+
+MAIN_EVENT_LOOP = None
+BOT_INSTANCE = None
+SCREENSHOT_TOKEN = os.environ.get("SCREENSHOT_TOKEN", "")
+
+@app.route('/')
+def health_check():
+    return "Bot is running!", 200
+
+@app.route('/health')
+def health():
+    return {"status": "ok", "time": datetime.now().isoformat()}, 200
+
+@app.route('/screenshot')
+def screenshot():
+    if SCREENSHOT_TOKEN:
+        token = request.args.get("token", "")
+        if token != SCREENSHOT_TOKEN:
+            return "Forbidden", 403
+
+    if BOT_INSTANCE is None or BOT_INSTANCE.page is None or MAIN_EVENT_LOOP is None:
+        return "Бот ещё не запущен", 503
+
+    async def _take_screenshot():
+        return await BOT_INSTANCE.page.screenshot(full_page=True)
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(_take_screenshot(), MAIN_EVENT_LOOP)
+        image_bytes = future.result(timeout=15)
+        return Response(image_bytes, mimetype="image/png")
+    except Exception as e:
+        return f"Ошибка получения скриншота: {e}", 500
+
+@app.route('/debug-structure')
+def debug_structure():
+    if SCREENSHOT_TOKEN:
+        token = request.args.get("token", "")
+        if token != SCREENSHOT_TOKEN:
+            return "Forbidden", 403
+
+    if BOT_INSTANCE is None or BOT_INSTANCE.page is None:
+        return "Бот не запущен", 503
+
+    async def _get_structure():
+        result = {}
+        try:
+            await BOT_INSTANCE.page.goto("https://funpay.com/chat/", wait_until="domcontentloaded")
+            await BOT_INSTANCE.page.wait_for_load_state("networkidle")
+            await asyncio.sleep(2)
+
+            dialogs = BOT_INSTANCE.page.locator('.contact-item')
+            dialog_count = await dialogs.count()
+            result["dialog_count"] = dialog_count
+
+            if dialog_count == 0:
+                result["error"] = "Нет диалогов"
+                return result
+
+            await dialogs.first.click()
+            await BOT_INSTANCE.page.wait_for_load_state("networkidle")
+            await asyncio.sleep(2)
+
+            messages = BOT_INSTANCE.page.locator('.chat-msg-item')
+            msg_count = await messages.count()
+            result["msg_count"] = msg_count
+
+            if msg_count == 0:
+                result["error"] = "Нет сообщений"
+                return result
+
+            first_msg = messages.first
+            attrs = await first_msg.evaluate("""
+                element => {
+                    if (!element) return null;
+                    const result = {};
+                    for (const attr of element.attributes) {
+                        result[attr.name] = attr.value;
+                    }
+                    result.outerHTML = element.outerHTML || '';
+                    result.className = element.className || '';
+                    result.tagName = element.tagName || '';
+                    return result;
+                }
+            """)
+
+            result["attributes"] = attrs
+            result["has_data_id"] = 'data-id' in (attrs or {})
+            result["has_id"] = 'id' in (attrs or {})
+            result["success"] = True
+
+            return result
+
+        except Exception as e:
+            result["error"] = str(e)
+            result["error_type"] = type(e).__name__
+            import traceback
+            result["traceback"] = traceback.format_exc()
+            return result
+
+    try:
+        future = asyncio.run_coroutine_threadsafe(_get_structure(), MAIN_EVENT_LOOP)
+        result = future.result(timeout=30)
+        return json.dumps(result, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return f"Ошибка: {e}", 500
+
+@app.route('/debug-now')
+def debug_now():
+    if SCREENSHOT_TOKEN:
+        token = request.args.get("token", "")
+        if token != SCREENSHOT_TOKEN:
+            return "Forbidden", 403
+
+    if BOT_INSTANCE is None:
+        return "Бот ещё не запущен", 503
+
+    BOT_INSTANCE.debug_requested = True
+    return "Запрошено. Скриншот и HTML придут в Telegram в течение 15-20 секунд.", 200
+
+def run_web():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+# ==========================================
+# 6. ЗАПУСК
+# ==========================================
+def run_bot():
+    print("🔵 run_bot()")
+    sys.stdout.flush()
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(main_bot())
+    except Exception as e:
+        print(f"❌ RUN_BOT_ERROR: {repr(e)}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        loop.close()
+
+async def main_bot():
+    global MAIN_EVENT_LOOP, BOT_INSTANCE
+    print("🔵 main_bot()")
+    sys.stdout.flush()
+    MAIN_EVENT_LOOP = asyncio.get_running_loop()
+    bot = FunPayBot(CONFIG)
+    BOT_INSTANCE = bot
+    await bot.start()
+
+def main():
+    print("🔵 main()")
+    sys.stdout.flush()
+    print("🔄 Запуск...")
+    sys.stdout.flush()
+    web_thread = threading.Thread(target=run_web, daemon=True)
+    web_thread.start()
+    print(f"✅ Health check: порт {os.environ.get('PORT', 10000)}")
+    sys.stdout.flush()
+    run_bot()
+
+if __name__ == "__main__":
+    print("🔵 __main__")
+    sys.stdout.flush()
+    main()
