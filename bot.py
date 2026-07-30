@@ -8,8 +8,10 @@ import aiohttp
 import sys
 import threading
 from playwright.async_api import async_playwright
-from datetime import datetime
-from flask import Flask, request
+from datetime import datetime, timedelta
+from flask import Flask, request, Response
+import sqlite3
+from contextlib import contextmanager
 
 # ==========================================
 # 1. НАСТРОЙКИ
@@ -52,7 +54,6 @@ try:
             r"заказ #[A-Z0-9]+",
             r"Покупатель.*подтвердил"
         ],
-        "ORDER_WORDS": ["здравствуйте", "привет", "хочу купить", "заказ", "куплю", "есть", "продаете", "добрый день", "здрасьте"],
         "FRUIT_COMMAND": "!фрукт",
         "CODE_COMMAND": "!код",
         "CHECK_INTERVAL": 15,
@@ -63,7 +64,7 @@ except ValueError as e:
     sys.exit(1)
 
 # ==========================================
-# 2. TELEGRAM (АСИНХРОННЫЙ)
+# 2. TELEGRAM
 # ==========================================
 async def send_telegram_async(message):
     if not CONFIG["TELEGRAM_TOKEN"] or not CONFIG["TELEGRAM_CHAT_IDS"]:
@@ -100,11 +101,10 @@ def send_telegram(message):
         return asyncio.run(send_telegram_async(message))
 
 async def send_telegram_document_async(file_path, caption=""):
-    """Отправляет файл (например, HTML страницы) в Telegram как документ — для диагностики селекторов."""
     if not CONFIG["TELEGRAM_TOKEN"] or not CONFIG["TELEGRAM_CHAT_IDS"]:
         return False
     if not os.path.exists(file_path):
-        print(f"⚠️ Файл для отправки не найден: {file_path}")
+        print(f"⚠️ Файл не найден: {file_path}")
         return False
     sent_count = 0
     async with aiohttp.ClientSession() as session:
@@ -125,17 +125,16 @@ async def send_telegram_document_async(file_path, caption=""):
                             print(f"✅ Документ отправлен: {chat_id}")
                         else:
                             text = await response.text()
-                            print(f"❌ Ошибка отправки документа {chat_id}: {text}")
+                            print(f"❌ Ошибка документа {chat_id}: {text}")
             except Exception as e:
-                print(f"❌ Ошибка отправки документа {chat_id}: {e}")
+                print(f"❌ Ошибка документа {chat_id}: {e}")
     return sent_count > 0
 
 async def send_telegram_photo_async(photo_path, caption=""):
-    """Отправляет скриншот в Telegram — удобно для диагностики на серверах без доступа к ФС."""
     if not CONFIG["TELEGRAM_TOKEN"] or not CONFIG["TELEGRAM_CHAT_IDS"]:
         return False
     if not os.path.exists(photo_path):
-        print(f"⚠️ Файл для отправки не найден: {photo_path}")
+        print(f"⚠️ Файл не найден: {photo_path}")
         return False
     sent_count = 0
     async with aiohttp.ClientSession() as session:
@@ -156,17 +155,14 @@ async def send_telegram_photo_async(photo_path, caption=""):
                             print(f"✅ Скриншот отправлен: {chat_id}")
                         else:
                             text = await response.text()
-                            print(f"❌ Ошибка отправки фото {chat_id}: {text}")
+                            print(f"❌ Ошибка фото {chat_id}: {text}")
             except Exception as e:
-                print(f"❌ Ошибка отправки фото {chat_id}: {e}")
+                print(f"❌ Ошибка фото {chat_id}: {e}")
     return sent_count > 0
 
 # ==========================================
-# 3. БАЗА ДАННЫХ (SQLite)
+# 3. БАЗА ДАННЫХ
 # ==========================================
-import sqlite3
-from contextlib import contextmanager
-
 class ClientDatabase:
     def __init__(self):
         self.db_file = "clients.db"
@@ -189,6 +185,7 @@ class ClientDatabase:
                     name TEXT PRIMARY KEY,
                     chat_url TEXT,
                     first_message_sent INTEGER DEFAULT 0,
+                    first_message_time TEXT,
                     payment_confirmed INTEGER DEFAULT 0,
                     thank_you_sent INTEGER DEFAULT 0,
                     fruit_notified INTEGER DEFAULT 0,
@@ -221,7 +218,54 @@ class ClientDatabase:
             return cursor.rowcount > 0
     
     def mark_first_message_sent(self, client_name):
-        return self._set_value(client_name, "first_message_sent", True)
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE clients
+                SET first_message_sent = 1,
+                    first_message_time = ?
+                WHERE name = ?
+            """, (datetime.now().isoformat(), client_name))
+            conn.commit()
+            return cursor.rowcount > 0
+    
+    def is_first_message_sent(self, client_name):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT first_message_sent,
+                       first_message_time
+                FROM clients
+                WHERE name = ?
+            """, (client_name,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return False
+            
+            sent = bool(row["first_message_sent"])
+            msg_time = row["first_message_time"]
+            
+            if not sent:
+                return False
+            
+            if msg_time:
+                try:
+                    msg_time = datetime.fromisoformat(msg_time)
+                    if datetime.now() - msg_time > timedelta(hours=2):
+                        cursor.execute("""
+                            UPDATE clients
+                            SET first_message_sent = 0,
+                                first_message_time = NULL
+                            WHERE name = ?
+                        """, (client_name,))
+                        conn.commit()
+                        return False
+                except:
+                    pass
+            
+            return True
+    
     def mark_payment_confirmed(self, client_name):
         return self._set_value(client_name, "payment_confirmed", True)
     def mark_thank_you_sent(self, client_name):
@@ -230,8 +274,6 @@ class ClientDatabase:
         return self._set_value(client_name, "fruit_notified", True)
     def mark_code_notified(self, client_name):
         return self._set_value(client_name, "code_notified", True)
-    def is_first_message_sent(self, client_name):
-        return self._get_value(client_name, "first_message_sent")
     def is_thank_you_sent(self, client_name):
         return self._get_value(client_name, "thank_you_sent")
     def is_fruit_notified(self, client_name):
@@ -252,6 +294,7 @@ class FunPayBot:
         self.running = True
         self.playwright = None
         self.debug_requested = False
+        self.own_username = None
     
     async def start(self):
         print("🔵 START()")
@@ -315,8 +358,6 @@ class FunPayBot:
         await self.main_loop()
     
     async def _accept_cookies(self):
-        """Закрывает баннер согласия на cookies (cc-accept-all) — без этого
-        баннер может перекрывать поле ввода и мешать кликам/отправке сообщений."""
         try:
             accept_btn = self.page.locator('.cc-accept-all').first
             if await accept_btn.count() > 0 and await accept_btn.is_visible():
@@ -327,7 +368,6 @@ class FunPayBot:
             print(f"⚠️ Не удалось закрыть cookie-баннер: {e}")
     
     async def _save_debug(self, tag):
-        """Сохраняет скриншот и HTML, и отправляет скриншот в Telegram (полезно, когда нет доступа к ФС сервера)."""
         try:
             screenshot_path = f"/tmp/debug_{tag}.png"
             html_path = f"/tmp/debug_{tag}.html"
@@ -342,7 +382,6 @@ class FunPayBot:
             await send_telegram_photo_async(screenshot_path, caption)
             await send_telegram_document_async(html_path, f"HTML: {tag}")
 
-            # Ищем явные признаки капчи/блокировки на странице
             page_text = (await self.page.content()).lower()
             suspicious_markers = ["captcha", "капча", "подтвердите, что вы не робот", "cloudflare", "доступ ограничен", "заблокирован"]
             found_markers = [m for m in suspicious_markers if m in page_text]
@@ -352,15 +391,7 @@ class FunPayBot:
             print(f"⚠️ Не удалось сохранить/отправить debug: {e}")
     
     async def login(self):
-        """
-        Проверяет, что сессия по cookie golden_key активна.
-        Форма логина через селекторы больше не используется — FunPay требует
-        прохождения Cloudflare-капчи при входе через логин/пароль, которую
-        headless-браузер пройти не может. Вместо этого сессия переносится
-        через cookie golden_key, полученный из ручного входа в обычном браузере.
-        """
         try:
-            # Точный признак авторизации — блок с именем текущего пользователя в шапке сайта
             account_locator = self.page.locator('.user-link-name').first
             is_logged_in = await account_locator.count() > 0
 
@@ -370,8 +401,6 @@ class FunPayBot:
                 await send_telegram_async(f"✅ <b>Вход в FunPay выполнен</b> (аккаунт: {self.own_username})")
                 return
 
-            # Если сессии нет — форма логина всё равно потребует капчу, поэтому
-            # просто сообщаем, что golden_key протух, и просим обновить его вручную.
             await self._save_debug("session_invalid")
             raise RuntimeError(
                 "❌ Сессия по golden_key недействительна (истекла или неверна). "
@@ -392,6 +421,51 @@ class FunPayBot:
             pass
         return None
     
+    async def _get_message_id(self, message_element):
+        """Получает ID сообщения из атрибута или data-атрибута"""
+        try:
+            msg_id = await message_element.get_attribute('data-id')
+            if msg_id:
+                return msg_id
+            msg_id = await message_element.get_attribute('id')
+            if msg_id:
+                return msg_id
+            classes = await message_element.get_attribute('class') or ""
+            match = re.search(r'msg-(\d+)', classes)
+            if match:
+                return match.group(1)
+        except:
+            pass
+        return None
+    
+    async def _is_recent_message(self, message_element, max_age_minutes=5):
+        """
+        Проверяет, что сообщение новое (не старше max_age_minutes минут).
+        Если не удается определить время - считает сообщение новым.
+        """
+        try:
+            timestamp = await message_element.get_attribute('data-time')
+            if timestamp:
+                try:
+                    msg_time = datetime.fromtimestamp(int(timestamp))
+                    age = datetime.now() - msg_time
+                    return age.total_seconds() < max_age_minutes * 60
+                except:
+                    pass
+            
+            time_str = await message_element.get_attribute('datetime')
+            if time_str:
+                try:
+                    msg_time = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+                    age = datetime.now() - msg_time.replace(tzinfo=None)
+                    return age.total_seconds() < max_age_minutes * 60
+                except:
+                    pass
+            
+            return True
+        except:
+            return True
+    
     async def check_new_dialogs(self):
         try:
             if "/chat" not in self.page.url:
@@ -400,10 +474,6 @@ class FunPayBot:
                 await asyncio.sleep(2)
                 await self._accept_cookies()
             
-            # Ручная диагностика: если через /debug-now попросили дамп — сохраняем
-            # HTML+скриншот страницы чатов "как есть". Если есть непрочитанный диалог —
-            # дополнительно открываем его, чтобы снять разметку самих сообщений
-            # (они подгружаются через JS/WebSocket только после клика на диалог).
             if self.debug_requested:
                 await self._save_debug("chat_list")
                 unread_preview = self.page.locator('.contact-item.unread').first
@@ -416,13 +486,15 @@ class FunPayBot:
                         print(f"⚠️ Не удалось открыть диалог для диагностики: {e}")
                 self.debug_requested = False
             
-            dialogs = self.page.locator('.contact-item.unread')
+            # Ищем ВСЕ диалоги
+            dialogs = self.page.locator('.contact-item')
             dialog_count = await dialogs.count()
-            print(f"🔍 Диалогов с непрочитанным (по текущим селекторам): {dialog_count}")
+            print(f"🔍 Всего диалогов: {dialog_count}")
+            
             if dialog_count == 0:
                 return
             
-            print(f"📩 Найдено {dialog_count} диалогов")
+            print(f"📩 Обрабатываю {dialog_count} диалогов")
             
             for i in range(dialog_count):
                 try:
@@ -443,43 +515,65 @@ class FunPayBot:
                     if msg_count == 0:
                         continue
                     
+                    # Получаем последнее сообщение
+                    last_msg_element = messages.nth(msg_count - 1)
+                    msg_text = await last_msg_element.text_content() or ""
+                    is_from_client = await self._is_message_from_client(last_msg_element)
+                    is_payment = await self._is_payment_confirmation(msg_text)
+                    
+                    # Получаем ID последнего сообщения
+                    last_msg_id = await self._get_message_id(last_msg_element)
+                    
+                    # Добавляем клиента в базу
+                    self.db.add_client(client_name, self.page.url)
+                    
+                    # Проверяем, было ли уже отправлено приветствие
+                    first_msg_sent = self.db.is_first_message_sent(client_name)
+                    
+                    # 1. Если сообщение от клиента и приветствие еще не отправлено
+                    if is_from_client and not first_msg_sent:
+                        # Проверяем, что это не старое сообщение
+                        is_new = await self._is_recent_message(last_msg_element)
+                        
+                        if is_new:
+                            first_msg = self.config["FIRST_MESSAGE"].format(buyer_name=buyer_name)
+                            await self.send_message(first_msg)
+                            self.db.mark_first_message_sent(client_name)
+                            print(f"📨 Первое сообщение для {client_name}")
+                            await asyncio.sleep(1)
+                        else:
+                            # Если сообщение старое - просто отмечаем как обработанное
+                            print(f"⏭️ Пропускаю старое сообщение для {client_name}")
+                            self.db.mark_first_message_sent(client_name)
+                    
+                    # 2. Проверяем все сообщения на команды и оплату
                     for j in range(msg_count):
                         try:
                             msg_element = messages.nth(j)
-                            msg_text = await msg_element.text_content() or ""
-                            is_from_client = await self._is_message_from_client(msg_element)
-                            is_payment = await self._is_payment_confirmation(msg_text)
+                            msg_text_full = await msg_element.text_content() or ""
+                            is_from_client_msg = await self._is_message_from_client(msg_element)
+                            is_payment_msg = await self._is_payment_confirmation(msg_text_full)
                             
-                            self.db.add_client(client_name, self.page.url)
-                            
-                            if is_from_client:
-                                msg_lower = msg_text.lower()
+                            if is_from_client_msg:
+                                msg_lower = msg_text_full.lower()
                                 if self.config["FRUIT_COMMAND"] in msg_lower:
                                     if not self.db.is_fruit_notified(client_name):
-                                        notify = f"🍎 <b>КЛИЕНТ КУПИЛ ФРУКТ!</b>\n\n👤 {client_name}\n💬 {msg_text[:200]}\n🔗 {self.page.url}\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+                                        notify = f"🍎 <b>КЛИЕНТ КУПИЛ ФРУКТ!</b>\n\n👤 {client_name}\n💬 {msg_text_full[:200]}\n🔗 {self.page.url}\n⏰ {datetime.now().strftime('%H:%M:%S')}"
                                         await send_telegram_async(notify)
                                         self.db.mark_fruit_notified(client_name)
                                         print(f"🍎 Уведомление о фрукте для {client_name}")
                                         await self.send_message("🍎 Продавец уведомлен!")
                                 elif self.config["CODE_COMMAND"] in msg_lower:
                                     if not self.db.is_code_notified(client_name):
-                                        notify = f"🔑 <b>КЛИЕНТ ЗАПРОСИЛ КОД!</b>\n\n👤 {client_name}\n💬 {msg_text[:200]}\n🔗 {self.page.url}\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+                                        notify = f"🔑 <b>КЛИЕНТ ЗАПРОСИЛ КОД!</b>\n\n👤 {client_name}\n💬 {msg_text_full[:200]}\n🔗 {self.page.url}\n⏰ {datetime.now().strftime('%H:%M:%S')}"
                                         await send_telegram_async(notify)
                                         self.db.mark_code_notified(client_name)
                                         print(f"🔑 Уведомление о коде для {client_name}")
                                         await self.send_message("🔑 Продавец уведомлен!")
-                                elif not self.db.is_first_message_sent(client_name):
-                                    is_order = any(word in msg_lower for word in self.config["ORDER_WORDS"])
-                                    if is_order:
-                                        first_msg = self.config["FIRST_MESSAGE"].format(buyer_name=buyer_name)
-                                        await self.send_message(first_msg)
-                                        self.db.mark_first_message_sent(client_name)
-                                        print(f"📨 Первое сообщение для {client_name}")
-                                        await asyncio.sleep(1)
                             
-                            if is_payment:
+                            if is_payment_msg:
                                 if not self.db.is_thank_you_sent(client_name):
-                                    order_match = re.search(r'#[A-Z0-9]+', msg_text)
+                                    order_match = re.search(r'#[A-Z0-9]+', msg_text_full)
                                     order_number = order_match.group(0) if order_match else ""
                                     print(f"💳 Оплата! Заказ {order_number} | {client_name}")
                                     notify = f"💳 <b>ОПЛАТА ПОДТВЕРЖДЕНА!</b>\n\n👤 {client_name}\n📦 Заказ: {order_number}\n🔗 {self.page.url}\n⏰ {datetime.now().strftime('%H:%M:%S')}"
@@ -611,19 +705,12 @@ class FunPayBot:
         await send_telegram_async("🛑 <b>Бот остановлен</b>")
 
 # ==========================================
-# 5. HEALTH CHECKS + LIVE SCREENSHOT (Flask)
+# 5. HEALTH CHECKS + SCREENSHOT
 # ==========================================
-from flask import Response
-import concurrent.futures
-
 app = Flask(__name__)
 
-# Ссылки на работающий цикл событий и экземпляр бота — нужны, чтобы Flask
-# (который крутится в отдельном потоке) мог попросить Playwright сделать
-# скриншот текущей страницы прямо из основного asyncio-цикла бота.
 MAIN_EVENT_LOOP = None
 BOT_INSTANCE = None
-
 SCREENSHOT_TOKEN = os.environ.get("SCREENSHOT_TOKEN", "")
 
 @app.route('/')
@@ -636,8 +723,6 @@ def health():
 
 @app.route('/screenshot')
 def screenshot():
-    # Простая защита токеном, чтобы скриншот не мог открыть кто угодно по адресу сервиса.
-    # Задайте переменную окружения SCREENSHOT_TOKEN и открывайте /screenshot?token=ваш_токен
     if SCREENSHOT_TOKEN:
         token = request.args.get("token", "")
         if token != SCREENSHOT_TOKEN:
@@ -658,9 +743,6 @@ def screenshot():
 
 @app.route('/debug-now')
 def debug_now():
-    # Ставит боту флаг: при следующей проверке диалогов (в течение CHECK_INTERVAL секунд)
-    # он пришлёт в Telegram скриншот и HTML-файл текущей страницы чатов "как есть" —
-    # это нужно, чтобы подобрать точные CSS-селекторы под реальную вёрстку FunPay.
     if SCREENSHOT_TOKEN:
         token = request.args.get("token", "")
         if token != SCREENSHOT_TOKEN:
