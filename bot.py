@@ -22,8 +22,7 @@ def get_env_var(name, required=True):
 
 try:
     CONFIG = {
-        "FUNPAY_LOGIN": get_env_var("FUNPAY_LOGIN"),
-        "FUNPAY_PASSWORD": get_env_var("FUNPAY_PASSWORD"),
+        "FUNPAY_GOLDEN_KEY": get_env_var("FUNPAY_GOLDEN_KEY"),
         "TELEGRAM_TOKEN": get_env_var("TELEGRAM_TOKEN"),
         "TELEGRAM_CHAT_IDS": ["1973759066"],   # ← ТВОЙ CHAT ID
         "FIRST_MESSAGE": """Здравствуйте, {buyer_name}!
@@ -257,12 +256,22 @@ class FunPayBot:
             });
         """)
         
+        print("🔑 Подставляю сессию (golden_key)...")
+        await self.page.context.add_cookies([
+            {
+                "name": "golden_key",
+                "value": self.config["FUNPAY_GOLDEN_KEY"],
+                "domain": "funpay.com",
+                "path": "/",
+            }
+        ])
+        
         print("🔄 Открываю FunPay...")
         await self.page.goto("https://funpay.com/", timeout=60000)
         await self.page.wait_for_load_state("networkidle")
         print(f"📍 URL: {self.page.url}")
         
-        print("🔄 Вход...")
+        print("🔄 Проверка входа по сессии...")
         await self.login()
         
         print("🔄 Отправка уведомления...")
@@ -296,130 +305,33 @@ class FunPayBot:
             print(f"⚠️ Не удалось сохранить/отправить debug: {e}")
     
     async def login(self):
+        """
+        Проверяет, что сессия по cookie golden_key активна.
+        Форма логина через селекторы больше не используется — FunPay требует
+        прохождения Cloudflare-капчи при входе через логин/пароль, которую
+        headless-браузер пройти не может. Вместо этого сессия переносится
+        через cookie golden_key, полученный из ручного входа в обычном браузере.
+        """
         try:
-            print("🔑 Ищу кнопку входа...")
-            if "/user/" in self.page.url:
-                print("✅ Уже авторизован")
+            # Ищем признаки авторизованного состояния: ссылку на профиль/баланс в шапке,
+            # либо прямое совпадение URL с /users/ (у FunPay профиль обычно вида /users/12345/)
+            account_locator = self.page.locator('a[href*="/users/"], .user-link, .header-user')
+            is_logged_in = await account_locator.count() > 0 or "/users/" in self.page.url
+
+            if is_logged_in:
+                print("✅ Сессия активна — вход выполнен через cookie")
+                await send_telegram_async("✅ <b>Вход в FunPay выполнен (по сохранённой сессии)</b>")
                 return
-            
-            login_selectors = [
-                'a:has-text("Войти")', 'a:has-text("Вход")',
-                'button:has-text("Войти")', 'button:has-text("Вход")',
-                'text="Войти"', 'text="Вход"',
-                '.login-btn', '[class*="login"]'
-            ]
-            
-            login_found = False
-            for selector in login_selectors:
-                try:
-                    locator = self.page.locator(selector).first
-                    if await locator.count() > 0:
-                        await locator.click(timeout=5000)
-                        print(f"✅ Нажал: {selector}")
-                        login_found = True
-                        break
-                except Exception:
-                    continue
-            
-            if not login_found:
-                await self._save_debug("no_login_button")
-                raise RuntimeError("❌ Кнопка входа не найдена")
-            
-            # Ждём, пока реально появится форма входа (модалка), а не просто спим по таймеру
-            try:
-                await self.page.wait_for_selector(
-                    'input[placeholder="Имя или почта"], input[name="login"], input[name="user[login]"]',
-                    timeout=10000
-                )
-            except Exception:
-                pass  # если не дождались — попробуем найти всё равно, диагностика ниже покажет причину
-            
-            await asyncio.sleep(1)
-            
-            print("🔑 Логин...")
-            # ВАЖНО: не используем общий input[type="text"] — на странице есть строка поиска игр
-            # с таким же типом, и она стоит в DOM раньше формы входа, из-за чего логин
-            # раньше улетал именно туда, а не в поле авторизации.
-            login_input = self.page.locator(
-                'input[placeholder="Имя или почта"], input[name="login"], input[name="user[login]"]'
-            ).first
-            if await login_input.count() == 0:
-                await self._save_debug("no_login_field")
-                raise RuntimeError("❌ Поле логина не найдено")
-            await login_input.click()
-            await login_input.fill(self.config["FUNPAY_LOGIN"])
-            await asyncio.sleep(1)
-            
-            print("🔑 Пароль...")
-            pass_input = self.page.locator(
-                'input[placeholder="Пароль"], input[name="password"], input[name="user[password]"], input[type="password"]'
-            ).first
-            if await pass_input.count() == 0:
-                await self._save_debug("no_password_field")
-                raise RuntimeError("❌ Поле пароля не найдено")
-            await pass_input.click()
-            await pass_input.fill(self.config["FUNPAY_PASSWORD"])
-            await asyncio.sleep(1)
-            
-            # Проверяем наличие Cloudflare Turnstile — если есть, автоматический вход, скорее всего,
-            # не пройдёт: такие капчи специально мешают headless-браузерам их проходить.
-            try:
-                turnstile = self.page.locator('iframe[src*="challenges.cloudflare.com"], [class*="cf-turnstile"]')
-                if await turnstile.count() > 0:
-                    print("⚠️ Обнаружена Cloudflare Turnstile капча")
-                    await self._save_debug("turnstile_detected")
-                    await send_telegram_async(
-                        "⚠️ <b>На странице входа обнаружена Cloudflare-капча.</b>\n"
-                        "Автоматический вход может не пройти без ручного решения капчи."
-                    )
-            except Exception:
-                pass
-            
-            print("🔑 Войти...")
-            submit_selectors = [
-                'button[type="submit"]', 'button:has-text("Войти")',
-                'button:has-text("Вход")', 'input[type="submit"]'
-            ]
-            
-            submit_found = False
-            for selector in submit_selectors:
-                try:
-                    locator = self.page.locator(selector).first
-                    if await locator.count() > 0:
-                        await locator.click(timeout=5000)
-                        print(f"✅ Нажал: {selector}")
-                        submit_found = True
-                        break
-                except Exception:
-                    continue
-            
-            if not submit_found:
-                await self._save_debug("no_submit_button")
-                raise RuntimeError("❌ Кнопка отправки не найдена")
-            
-            await asyncio.sleep(5)
-            await self.page.wait_for_load_state("networkidle", timeout=30000)
-            print(f"📍 URL после входа: {self.page.url}")
-            
-            if "/user/" in self.page.url:
-                print("✅ Успешный вход!")
-                await send_telegram_async("✅ <b>Успешный вход в FunPay!</b>")
-            else:
-                # Пробуем найти явный текст ошибки на странице (неверный логин/пароль и т.п.)
-                error_text = None
-                try:
-                    error_locator = self.page.locator(
-                        '.alert-danger, .form-error, .error-message, [class*="error"]'
-                    ).first
-                    if await error_locator.count() > 0:
-                        error_text = await error_locator.text_content()
-                except Exception:
-                    pass
-                await self._save_debug("login_not_confirmed")
-                if error_text:
-                    raise RuntimeError(f"❌ Не удалось подтвердить вход. Сообщение на странице: {error_text.strip()}")
-                raise RuntimeError("❌ Не удалось подтвердить вход")
-                
+
+            # Если сессии нет — форма логина всё равно потребует капчу, поэтому
+            # просто сообщаем, что golden_key протух, и просим обновить его вручную.
+            await self._save_debug("session_invalid")
+            raise RuntimeError(
+                "❌ Сессия по golden_key недействительна (истекла или неверна). "
+                "Нужно войти в FunPay вручную в обычном браузере, заново скопировать "
+                "cookie golden_key и обновить переменную FUNPAY_GOLDEN_KEY на сервере."
+            )
+
         except Exception as e:
             print(f"❌ Ошибка входа: {e}")
             await send_telegram_async(f"⚠️ <b>Ошибка входа!</b>\n{str(e)}")
@@ -610,6 +522,14 @@ class FunPayBot:
                         args=['--no-sandbox', '--disable-setuid-sandbox']
                     )
                     self.page = await self.browser.new_page()
+                    await self.page.context.add_cookies([
+                        {
+                            "name": "golden_key",
+                            "value": self.config["FUNPAY_GOLDEN_KEY"],
+                            "domain": "funpay.com",
+                            "path": "/",
+                        }
+                    ])
                     await self.page.goto("https://funpay.com/")
                     await self.login()
                     print("✅ Восстановлено!")
