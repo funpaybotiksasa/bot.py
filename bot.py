@@ -25,7 +25,7 @@ try:
         "FUNPAY_LOGIN": get_env_var("FUNPAY_LOGIN"),
         "FUNPAY_PASSWORD": get_env_var("FUNPAY_PASSWORD"),
         "TELEGRAM_TOKEN": get_env_var("TELEGRAM_TOKEN"),
-        "TELEGRAM_CHAT_IDS": ["8138491685", "1973759066"],   # ← ТВОЙ CHAT ID
+        "TELEGRAM_CHAT_IDS": ["1973759066"],   # ← ТВОЙ CHAT ID
         "FIRST_MESSAGE": """Здравствуйте, {buyer_name}!
 
 ⏰ Время работы продавца с 5:00 до 22:00 по МСК.
@@ -205,7 +205,8 @@ class FunPayBot:
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
-                    '--disable-gpu'
+                    '--disable-gpu',
+                    '--disable-blink-features=AutomationControlled'
                 ]
             )
             print("✅ Chromium запущен")
@@ -213,7 +214,12 @@ class FunPayBot:
             print(f"❌ Chromium error: {repr(e)}")
             raise
         
-        self.page = await self.browser.new_page()
+        self.page = await self.browser.new_page(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            locale="ru-RU"
+        )
         await self.page.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
@@ -234,6 +240,17 @@ class FunPayBot:
         print("🔄 Запуск главного цикла...")
         await self.main_loop()
     
+    async def _save_debug(self, tag):
+        """Сохраняет скриншот и HTML страницы для диагностики проблем с селекторами."""
+        try:
+            await self.page.screenshot(path=f"/app/debug_{tag}.png", full_page=True)
+            html = await self.page.content()
+            with open(f"/app/debug_{tag}.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            print(f"🔍 Debug сохранён: debug_{tag}.png / debug_{tag}.html")
+        except Exception as e:
+            print(f"⚠️ Не удалось сохранить debug: {e}")
+    
     async def login(self):
         try:
             print("🔑 Ищу кнопку входа...")
@@ -242,37 +259,57 @@ class FunPayBot:
                 return
             
             login_selectors = [
-                'text="Вход"', 'text="Войти"', 'button:has-text("Вход")',
-                'button:has-text("Войти")', 'a:has-text("Вход")', '.login-btn', '[class*="login"]'
+                'a:has-text("Войти")', 'a:has-text("Вход")',
+                'button:has-text("Войти")', 'button:has-text("Вход")',
+                'text="Войти"', 'text="Вход"',
+                '.login-btn', '[class*="login"]'
             ]
             
             login_found = False
             for selector in login_selectors:
                 try:
-                    locator = self.page.locator(selector)
+                    locator = self.page.locator(selector).first
                     if await locator.count() > 0:
                         await locator.click(timeout=5000)
                         print(f"✅ Нажал: {selector}")
                         login_found = True
                         break
-                except:
+                except Exception:
                     continue
             
             if not login_found:
+                await self._save_debug("no_login_button")
                 raise RuntimeError("❌ Кнопка входа не найдена")
             
-            await asyncio.sleep(2)
+            # Ждём, пока реально появится форма входа (модалка), а не просто спим по таймеру
+            try:
+                await self.page.wait_for_selector(
+                    'input[name="login"], input[name="user[login]"], '
+                    'input[type="email"], input[type="text"]:visible',
+                    timeout=10000
+                )
+            except Exception:
+                pass  # если не дождались — попробуем найти всё равно, диагностика ниже покажет причину
+            
+            await asyncio.sleep(1)
             
             print("🔑 Логин...")
-            login_input = self.page.locator('input[name="user[login]"]')
+            login_input = self.page.locator(
+                'input[name="login"], input[name="user[login]"], '
+                'input[type="email"], input[type="text"]'
+            ).first
             if await login_input.count() == 0:
+                await self._save_debug("no_login_field")
                 raise RuntimeError("❌ Поле логина не найдено")
             await login_input.fill(self.config["FUNPAY_LOGIN"])
             await asyncio.sleep(1)
             
             print("🔑 Пароль...")
-            pass_input = self.page.locator('input[name="user[password]"]')
+            pass_input = self.page.locator(
+                'input[name="password"], input[name="user[password]"], input[type="password"]'
+            ).first
             if await pass_input.count() == 0:
+                await self._save_debug("no_password_field")
                 raise RuntimeError("❌ Поле пароля не найдено")
             await pass_input.fill(self.config["FUNPAY_PASSWORD"])
             await asyncio.sleep(1)
@@ -286,16 +323,17 @@ class FunPayBot:
             submit_found = False
             for selector in submit_selectors:
                 try:
-                    locator = self.page.locator(selector)
+                    locator = self.page.locator(selector).first
                     if await locator.count() > 0:
                         await locator.click(timeout=5000)
                         print(f"✅ Нажал: {selector}")
                         submit_found = True
                         break
-                except:
+                except Exception:
                     continue
             
             if not submit_found:
+                await self._save_debug("no_submit_button")
                 raise RuntimeError("❌ Кнопка отправки не найдена")
             
             await asyncio.sleep(5)
@@ -306,6 +344,7 @@ class FunPayBot:
                 print("✅ Успешный вход!")
                 await send_telegram_async("✅ <b>Успешный вход в FunPay!</b>")
             else:
+                await self._save_debug("login_not_confirmed")
                 raise RuntimeError("❌ Не удалось подтвердить вход")
                 
         except Exception as e:
@@ -317,7 +356,7 @@ class FunPayBot:
         try:
             if await locator.count() > 0:
                 return await locator.first.text_content()
-        except:
+        except Exception:
             pass
         return None
     
@@ -435,7 +474,7 @@ class FunPayBot:
                     match = re.search(r'/user/([^/]+)', href)
                     if match:
                         return match.group(1)
-        except:
+        except Exception:
             pass
         return None
     
@@ -453,7 +492,7 @@ class FunPayBot:
                 if bot_msg in text_lower:
                     return False
             return True
-        except:
+        except Exception:
             return True
     
     async def send_message(self, text):
