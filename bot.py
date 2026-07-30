@@ -386,12 +386,22 @@ class FunPayBot:
                 await asyncio.sleep(2)
             
             # Ручная диагностика: если через /debug-now попросили дамп — сохраняем
-            # HTML+скриншот страницы чатов "как есть", чтобы подобрать точные селекторы.
+            # HTML+скриншот страницы чатов "как есть". Если есть непрочитанный диалог —
+            # дополнительно открываем его, чтобы снять разметку самих сообщений
+            # (они подгружаются через JS/WebSocket только после клика на диалог).
             if self.debug_requested:
-                await self._save_debug("chat_page_manual")
+                await self._save_debug("chat_list")
+                unread_preview = self.page.locator('.contact-item.unread').first
+                if await unread_preview.count() > 0:
+                    try:
+                        await unread_preview.click()
+                        await asyncio.sleep(2)
+                        await self._save_debug("dialog_opened")
+                    except Exception as e:
+                        print(f"⚠️ Не удалось открыть диалог для диагностики: {e}")
                 self.debug_requested = False
             
-            dialogs = self.page.locator('.chat-item:has(.badge), .chat-item.unread')
+            dialogs = self.page.locator('.contact-item.unread')
             dialog_count = await dialogs.count()
             print(f"🔍 Диалогов с непрочитанным (по текущим селекторам): {dialog_count}")
             if dialog_count == 0:
@@ -410,7 +420,7 @@ class FunPayBot:
                     await asyncio.sleep(2)
                     
                     buyer_name = await self._get_element_text(
-                        self.page.locator('.chat-header .user-name, .dialog-header .name')
+                        self.page.locator('.chat-header .media-user-name')
                     ) or "покупатель"
                     
                     messages = self.page.locator('.message-text')
@@ -485,7 +495,7 @@ class FunPayBot:
     
     async def _get_client_name_from_dialog(self, dialog):
         try:
-            name_selectors = ['.chat-item-name', '.user-name', '.name']
+            name_selectors = ['.media-user-name']
             for selector in name_selectors:
                 locator = dialog.locator(selector)
                 if await locator.count() > 0:
@@ -522,13 +532,13 @@ class FunPayBot:
     
     async def send_message(self, text):
         try:
-            textarea = self.page.locator('textarea[name="message"], .chat-input textarea')
+            textarea = self.page.locator('textarea[name="content"]')
             if await textarea.count() == 0:
                 print("⚠️ Поле ввода не найдено")
                 return
             await textarea.first.fill(text)
             await asyncio.sleep(0.5)
-            send_btn = self.page.locator('button:has-text("Отправить"), button[type="submit"]')
+            send_btn = self.page.locator('.chat-form button[type="submit"]')
             if await send_btn.count() > 0:
                 await send_btn.first.click()
             else:
