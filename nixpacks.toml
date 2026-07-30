@@ -1,5 +1,30 @@
 [phases.setup]
-nixPkgs = ["python311", "python311Packages.pip"]
+nixPkgs = [
+    "python311",
+    "python311Packages.pip",
+    "glib",
+    "nss",
+    "nspr",
+    "dbus",
+    "atk",
+    "at-spi2-atk",
+    "at-spi2-core",
+    "cups",
+    "expat",
+    "libdrm",
+    "mesa",
+    "pango",
+    "cairo",
+    "alsa-lib",
+    "xorg.libX11",
+    "xorg.libXcomposite",
+    "xorg.libXdamage",
+    "xorg.libXext",
+    "xorg.libXfixes",
+    "xorg.libXrandr",
+    "xorg.libxcb",
+    "xorg.libxkbcommon"
+]
 
 [variables]
 PLAYWRIGHT_BROWSERS_PATH = "/app/.cache/ms-playwright"
@@ -7,8 +32,3 @@ PLAYWRIGHT_BROWSERS_PATH = "/app/.cache/ms-playwright"
 [phases.install]
 cmds = [
     "pip install -r requirements.txt",
-    "playwright install chromium"
-]
-
-[phases.start]
-cmds = ["python3.11 bot.py"]
